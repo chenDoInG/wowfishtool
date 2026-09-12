@@ -125,6 +125,24 @@ def locate_game_window():
 		game_window_bbox = (0, 0, screen.size[0], screen.size[1])
 
 
+BAIT_KEY = '2'
+BAIT_REAPPLY_INTERVAL_SECONDS = 10 * 60
+
+last_bait_time = None
+
+
+def maybe_reapply_bait():
+	"""Press BAIT_KEY (bound in-game to a macro that re-lures the fishing pole) the
+	first time this runs and again every BAIT_REAPPLY_INTERVAL_SECONDS after that."""
+	global last_bait_time
+	if last_bait_time is not None and time.time() - last_bait_time < BAIT_REAPPLY_INTERVAL_SECONDS:
+		return
+	print('Applying fishing lure')
+	pyautogui.press(BAIT_KEY)
+	last_bait_time = time.time()
+	stop_requested.wait(2)
+
+
 def send_float():
 	print('Sending float')
 	pyautogui.press('1')
@@ -232,6 +250,10 @@ def snatch(place):
 
 def fish_once():
 	"""Cast, wait for a bite and try to catch it. Returns True if a fish was caught."""
+	maybe_reapply_bait()
+	if stop_requested.is_set():
+		return False
+
 	send_float()
 	if stop_requested.is_set():
 		return False
