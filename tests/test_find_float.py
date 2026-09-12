@@ -1,9 +1,9 @@
 """Regression test for find_float()'s template-matching logic.
 
-Uses a frozen sample screenshot (not the live var/fishing_session.png, which gets
-overwritten every time the bot actually runs) with a known, visually-verified float
-position, so tuning FLOAT_MATCH_THRESHOLD / FLOAT_SEARCH_X_RANGE /
-FLOAT_CLICK_X_OFFSET_RATIO later can't silently break detection without a test failing.
+Uses frozen sample screenshots (not the live var/fishing_session.png, which gets
+overwritten every time the bot actually runs) with known, visually-verified float
+positions, so tuning the matching/color-gating constants in fishing.py later can't
+silently break detection without a test failing.
 """
 import os
 
@@ -47,6 +47,21 @@ BACKLIT_EXPECTED_X, BACKLIT_EXPECTED_Y = 1355, 688
 # adding a template captured from this exact scene rather than any matching-logic change.
 STORMWIND_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'stormwind_canal.png')
 STORMWIND_EXPECTED_X, STORMWIND_EXPECTED_Y = 1399, 576
+# The wooden dock/boat railing visible in this same screenshot is locally more
+# saturated than the canal water too, and used to win once the color check stopped
+# requiring a specific hue - only excluded once large connected color blobs (a dock
+# spans hundreds of pixels; the float's never has) got dropped before gating.
+STORMWIND_FALSE_POSITIVE_X, STORMWIND_FALSE_POSITIVE_Y = 1304, 898
+
+# A deep-blue dusk sea shifted the float's colors so far around the hue wheel (the red
+# feather reading as magenta, ~160 hue, instead of its usual ~0-10) that no fixed hue
+# range could find it at all, and the water itself was saturated enough that no fixed
+# saturation floor worked either - fixed by gating on saturation relative to this
+# scene's own water instead of a fixed absolute range.
+DUSK_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'dusk_saturated_water.png')
+DUSK_EXPECTED_X, DUSK_EXPECTED_Y = 1245, 695
+DUSK_TOLERANCE_PX = 35   # the base's own hue is shifted too, so the click centroid
+# falls back to the matched window's geometric center here - less precise than usual
 
 
 def test_find_float_locates_the_known_float():
@@ -104,3 +119,13 @@ def test_find_float_detects_float_on_calm_canal_water():
 	x, y = place
 	assert abs(x - STORMWIND_EXPECTED_X) <= TOLERANCE_PX
 	assert abs(y - STORMWIND_EXPECTED_Y) <= TOLERANCE_PX
+	assert abs(x - STORMWIND_FALSE_POSITIVE_X) > TOLERANCE_PX or abs(y - STORMWIND_FALSE_POSITIVE_Y) > TOLERANCE_PX
+
+
+def test_find_float_detects_float_in_hue_shifted_dusk_water():
+	place = find_float(DUSK_FIXTURE_PATH)
+
+	assert place is not None
+	x, y = place
+	assert abs(x - DUSK_EXPECTED_X) <= DUSK_TOLERANCE_PX
+	assert abs(y - DUSK_EXPECTED_Y) <= DUSK_TOLERANCE_PX
