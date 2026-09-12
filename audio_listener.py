@@ -27,17 +27,19 @@ def is_bite(rms_window, threshold):
 	return sum(rms_window) / len(rms_window) > threshold
 
 
-def listen(threshold=15, rate=None, channels=1, silence_limit_seconds=1, timeout_seconds=20, stop_event=None, device_index=None):
-	"""Listen for a sound louder than `threshold` and return True once one is heard.
+def listen(threshold=15, rate=None, channels=1, silence_limit_seconds=1, timeout_seconds=23, stop_event=None, device_index=None):
+	"""Listen for the fishing bite sound and return True once one is heard.
 
 	By default this listens on the BlackHole loopback device (game audio routed through it),
 	falling back to the system default input device if BlackHole isn't found. Pass
 	`device_index` to force a specific device.
 
-	Gives up and returns False after `timeout_seconds` with no loud sound, or as soon as
-	`stop_event` (a threading.Event) is set, if one is passed in.
+	Gives up and returns False after `timeout_seconds` with no bite sound, or as soon as
+	`stop_event` (a threading.Event) is set, if one is passed in. The default padded a
+	couple seconds past the server's ~19-20s bite window to cover the time locate_float()
+	spends screenshotting and matching before this even starts listening.
 	"""
-	print('Well, now we are listening for loud sounds...')
+	print('Listening for the fishing bite sound...')
 	CHUNK = 1024  # CHUNKS of bytes to read each time from mic
 
 	p = pyaudio.PyAudio()
@@ -76,11 +78,11 @@ def listen(threshold=15, rate=None, channels=1, silence_limit_seconds=1, timeout
 				avg = sum(slid_win) / len(slid_win)
 				max_avg_seen = max(max_avg_seen, avg)
 				if is_bite(slid_win, threshold):
-					print('I heart something! (avg level ' + str(round(avg)) + ', threshold ' + str(threshold) + ')')
+					print('Heard a bite! (avg level ' + str(round(avg)) + ', threshold ' + str(threshold) + ')')
 					success = True
 					break
 			if time.time() - listening_start_time > timeout_seconds:
-				print('I don\'t hear anything already ' + str(timeout_seconds) + ' seconds! (peak avg level seen: ' + str(round(max_avg_seen)) + ', threshold ' + str(threshold) + ')')
+				print('No bite after ' + str(timeout_seconds) + 's (peak avg level seen: ' + str(round(max_avg_seen)) + ', threshold ' + str(threshold) + ')')
 				break
 		except IOError:
 			break

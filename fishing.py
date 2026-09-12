@@ -19,16 +19,40 @@ SCREENSHOT_PATH = 'var/fishing_session.png'
 FLOAT_TEMPLATE_GLOB = 'var/fishing_float_*.png'
 FLOAT_MATCH_THRESHOLD = 0.3
 
-# The float always lands in the water roughly in front of the character, which is this
-# central band of the window. Restricting the search to it keeps repetitive water-ripple
-# texture elsewhere on screen from occasionally out-scoring the real float.
+# The float always lands in the water close to the character, which - because a nearby
+# point on the water is lower in the view than a distant one - puts it in the lower part
+# of the window, well below the horizon and anything far off on it (a distant ship, say).
+# Restricting the search to this band keeps that class of thing, and repetitive
+# water-ripple texture elsewhere on screen, from out-scoring the real float. Every
+# confirmed-real detection logged so far has landed between 45% and 60% of the window's
+# height; a nearby ship is far more likely to sit above that than a closer cast is to
+# land below it, hence the lower bound sitting much closer to the observed range.
 FLOAT_SEARCH_X_RANGE = (0.25, 0.75)
-FLOAT_SEARCH_Y_RANGE = (0.20, 0.60)
+FLOAT_SEARCH_Y_RANGE = (0.38, 0.72)
 
-# The template's bounding box is pulled left of the actual bobber because the feather
-# sticks out to its left; nudge the click point right by this fraction of the matched
-# template's width to land on the bobber instead of its edge.
-FLOAT_CLICK_X_OFFSET_RATIO = 0.25
+# Water/shoreline edges, and other objects like passing ships, occasionally out-score
+# the real float on pure grayscale template matching. The float is distinctive in
+# always having BOTH a saturated warm (orange/yellow bobber base + red feather) and
+# cool (blue feather) color right next to each other - plain water has neither, and a
+# ship's hull/sails are usually warm-colored wood/canvas without the blue. Requiring
+# a minimum of each color separately (not just their combined count) rules both out
+# regardless of how the water or a passing ship happens to look.
+FLOAT_WARM_COLOR_RANGE = ((0, 90, 90), (30, 255, 255))
+FLOAT_COOL_COLOR_RANGE = ((85, 90, 90), (140, 255, 255))
+FLOAT_MIN_WARM_PIXELS = 15
+FLOAT_MIN_COOL_PIXELS = 15
+
+# The feather sticks out from the bobber base at an angle that differs per template
+# (and isn't fixed relative to the template's bounding box), so a fixed click-offset
+# ratio doesn't generalize across templates - one template's correct offset visibly
+# overshoots past the bobber on another. Instead, click the centroid of just the
+# base's narrower yellow/orange color range within the matched region of the actual
+# screenshot, which finds the real bobber regardless of which template matched.
+# The lower bound is set above the red feather's hue (~0-12) so a feather that happens
+# to be larger/brighter than the base in a given screenshot doesn't pull the centroid
+# off the base and onto the feather's tip.
+FLOAT_BASE_COLOR_RANGE = ((15, 80, 100), (35, 255, 255))
+FLOAT_MIN_BASE_COLOR_PIXELS = 15
 
 game_window_bbox = None   # (left, top, right, bottom) of the WoW window in absolute screen coords
 
@@ -108,15 +132,38 @@ def locate_float():
 	return find_float(screenshot_path)
 
 
+def _color_range_density(bgr_region, window_size, color_range):
+	"""Per-pixel count of pixels matching `color_range` in a window_size box anchored at
+	that pixel's top-left, i.e. density[y, x] covers the same box matchTemplate's
+	result[y, x] scores."""
+	hsv = cv2.cvtColor(bgr_region, cv2.COLOR_BGR2HSV)
+	mask = cv2.inRange(hsv, color_range[0], color_range[1])
+	# mask pixels are 0 or 255, so the unnormalized box sum is 255x the actual pixel count
+	density = cv2.boxFilter(mask, cv2.CV_32F, window_size, normalize=False, anchor=(0, 0), borderType=cv2.BORDER_CONSTANT)
+	return density / 255.0
+
+
+def _float_base_color_centroid(bgr_region):
+	"""Pixel-coordinate centroid of the bobber base's color within `bgr_region`, or None
+	if there aren't enough matching pixels to trust (falls back to the geometric center)."""
+	hsv = cv2.cvtColor(bgr_region, cv2.COLOR_BGR2HSV)
+	mask = cv2.inRange(hsv, FLOAT_BASE_COLOR_RANGE[0], FLOAT_BASE_COLOR_RANGE[1])
+	moments = cv2.moments(mask, binaryImage=True)
+	if moments['m00'] < FLOAT_MIN_BASE_COLOR_PIXELS:
+		return None
+	return moments['m10'] / moments['m00'], moments['m01'] / moments['m00']
+
+
 def find_float(screenshot_path):
 	# todo: maybe make some universal float without background?
-	img_rgb = cv2.imread(screenshot_path)
-	img_gray = cv2.cvtColor(img_rgb, cv2.COLOR_BGR2GRAY)
+	img_bgr = cv2.imread(screenshot_path)
+	img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 	h, w = img_gray.shape[:2]
 
 	search_x0, search_x1 = int(w * FLOAT_SEARCH_X_RANGE[0]), int(w * FLOAT_SEARCH_X_RANGE[1])
 	search_y0, search_y1 = int(h * FLOAT_SEARCH_Y_RANGE[0]), int(h * FLOAT_SEARCH_Y_RANGE[1])
-	search_area = img_gray[search_y0:search_y1, search_x0:search_x1]
+	search_area_gray = img_gray[search_y0:search_y1, search_x0:search_x1]
+	search_area_bgr = img_bgr[search_y0:search_y1, search_x0:search_x1]
 
 	best_val = 0
 	best_loc = None
@@ -126,7 +173,17 @@ def find_float(screenshot_path):
 		if template is None:
 			continue
 		th, tw = template.shape[:2]
-		result = cv2.matchTemplate(search_area, template, cv2.TM_CCOEFF_NORMED)
+		result = cv2.matchTemplate(search_area_gray, template, cv2.TM_CCOEFF_NORMED)
+
+		# Water/shoreline edges, and other objects like passing ships, can score just as
+		# well as the real float on pure grayscale correlation, but the float is the only
+		# thing that reliably has both a saturated warm AND cool color close together -
+		# rule out any position missing either one before picking the best-scoring one.
+		rh, rw = result.shape
+		warm_density = _color_range_density(search_area_bgr, (tw, th), FLOAT_WARM_COLOR_RANGE)[:rh, :rw]
+		cool_density = _color_range_density(search_area_bgr, (tw, th), FLOAT_COOL_COLOR_RANGE)[:rh, :rw]
+		result[(warm_density < FLOAT_MIN_WARM_PIXELS) | (cool_density < FLOAT_MIN_COOL_PIXELS)] = -1
+
 		_, max_val, _, max_loc = cv2.minMaxLoc(result)
 		if max_val > best_val:
 			best_val, best_loc, best_size = max_val, max_loc, (tw, th)
@@ -136,9 +193,11 @@ def find_float(screenshot_path):
 
 	tw, th = best_size
 	tl = (best_loc[0] + search_x0, best_loc[1] + search_y0)   # top-left, back in full-screenshot coordinates
-	center_x = tl[0] + tw / 2 + tw * FLOAT_CLICK_X_OFFSET_RATIO
-	center_y = tl[1] + th / 2
-	return center_x, center_y
+	matched_region = img_bgr[tl[1]:tl[1] + th, tl[0]:tl[0] + tw]
+	base_center = _float_base_color_centroid(matched_region)
+	if base_center is not None:
+		return tl[0] + base_center[0], tl[1] + base_center[1]
+	return tl[0] + tw / 2, tl[1] + th / 2
 
 
 def move_mouse(place, duration=0.3, quiet=False):

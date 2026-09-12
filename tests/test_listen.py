@@ -77,6 +77,6 @@ if __name__ == '__main__':
 	print()
 
 	print('=== Step 2: run the real listen() bite-detection function ===')
-	print('Default THRESHOLD=15. It waits up to 20s for a sustained loud sound.')
+	print('Default THRESHOLD=15. It waits up to 23s for a sustained bite sound.')
 	result = listen(device_index=loopback_index)
 	print('listen() returned: ' + str(result))
