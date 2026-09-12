@@ -63,6 +63,15 @@ DUSK_EXPECTED_X, DUSK_EXPECTED_Y = 1245, 695
 DUSK_TOLERANCE_PX = 35   # the base's own hue is shifted too, so the click centroid
 # falls back to the matched window's geometric center here - less precise than usual
 
+# An even more saturated sea plateaued right up through its own 99th percentile before
+# jumping sharply at the float's outlier pixels - baselining off the 90th percentile
+# left too little headroom below FLOAT_SATURATION_MARGIN to tell the two apart, so the
+# float was rejected as just more water. Fixed by baselining off the 99.5th percentile
+# instead, which sits on that plateau rather than already inside the jump.
+EXTREME_DUSK_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'extreme_dusk_saturation.png')
+EXTREME_DUSK_EXPECTED_X, EXTREME_DUSK_EXPECTED_Y = 1027, 708
+EXTREME_DUSK_TOLERANCE_PX = 35   # same hue-shifted-base caveat as the dusk case above
+
 
 def test_find_float_locates_the_known_float():
 	place = find_float(FIXTURE_PATH)
@@ -129,3 +138,12 @@ def test_find_float_detects_float_in_hue_shifted_dusk_water():
 	x, y = place
 	assert abs(x - DUSK_EXPECTED_X) <= DUSK_TOLERANCE_PX
 	assert abs(y - DUSK_EXPECTED_Y) <= DUSK_TOLERANCE_PX
+
+
+def test_find_float_detects_float_in_extremely_saturated_water():
+	place = find_float(EXTREME_DUSK_FIXTURE_PATH)
+
+	assert place is not None
+	x, y = place
+	assert abs(x - EXTREME_DUSK_EXPECTED_X) <= EXTREME_DUSK_TOLERANCE_PX
+	assert abs(y - EXTREME_DUSK_EXPECTED_Y) <= EXTREME_DUSK_TOLERANCE_PX

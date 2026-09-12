@@ -41,8 +41,13 @@ FLOAT_SEARCH_Y_RANGE = (0.38, 0.72)
 # measure how saturated *this* scene's water actually is and require a pixel to clear
 # that baseline by a margin to count as part of the float - adapts to the scene
 # instead of needing yet another hardcoded range for the next new lighting condition.
-FLOAT_SATURATION_BASELINE_PERCENTILE = 90
-FLOAT_SATURATION_MARGIN = 50
+# The baseline itself needs to sit close to the water's actual ceiling, not just above
+# its typical/median pixel: a very saturated sea can plateau hard right up to its own
+# 99th-plus percentile (still just water) before jumping sharply at the float's outlier
+# pixels, so a lower percentile like 90 sits on that plateau and leaves too thin a
+# margin to separate the two in that case.
+FLOAT_SATURATION_BASELINE_PERCENTILE = 99.5
+FLOAT_SATURATION_MARGIN = 20
 FLOAT_MIN_VALUE = 60   # ignore dark/shadowed pixels regardless of saturation
 FLOAT_MIN_COLOR_PIXELS = 15
 
