@@ -128,11 +128,11 @@ def locate_game_window():
 def send_float():
 	print('Sending float')
 	pyautogui.press('1')
-	time.sleep(2)
+	stop_requested.wait(2)
 
 
 def jump():
-	time.sleep(1)
+	stop_requested.wait(1)
 
 
 def locate_float():
@@ -143,12 +143,10 @@ def locate_float():
 	return find_float(screenshot_path)
 
 
-def _color_range_density(bgr_region, window_size, color_range):
-	"""Per-pixel count of pixels matching `color_range` in a window_size box anchored at
-	that pixel's top-left, i.e. density[y, x] covers the same box matchTemplate's
+def _box_density(mask, window_size):
+	"""Per-pixel count of nonzero `mask` pixels in a window_size box anchored at that
+	pixel's top-left, i.e. density[y, x] covers the same box matchTemplate's
 	result[y, x] scores."""
-	hsv = cv2.cvtColor(bgr_region, cv2.COLOR_BGR2HSV)
-	mask = cv2.inRange(hsv, color_range[0], color_range[1])
 	# mask pixels are 0 or 255, so the unnormalized box sum is 255x the actual pixel count
 	density = cv2.boxFilter(mask, cv2.CV_32F, window_size, normalize=False, anchor=(0, 0), borderType=cv2.BORDER_CONSTANT)
 	return density / 255.0
@@ -175,6 +173,8 @@ def find_float(screenshot_path):
 	search_y0, search_y1 = int(h * FLOAT_SEARCH_Y_RANGE[0]), int(h * FLOAT_SEARCH_Y_RANGE[1])
 	search_area_gray = img_gray[search_y0:search_y1, search_x0:search_x1]
 	search_area_bgr = img_bgr[search_y0:search_y1, search_x0:search_x1]
+	search_area_hsv = cv2.cvtColor(search_area_bgr, cv2.COLOR_BGR2HSV)
+	warm_mask = cv2.inRange(search_area_hsv, FLOAT_WARM_COLOR_RANGE[0], FLOAT_WARM_COLOR_RANGE[1])
 
 	best_val = 0
 	best_loc = None
@@ -191,7 +191,7 @@ def find_float(screenshot_path):
 		# base - rule out any position that doesn't have enough of that color nearby
 		# before picking the best-scoring one.
 		rh, rw = result.shape
-		warm_density = _color_range_density(search_area_bgr, (tw, th), FLOAT_WARM_COLOR_RANGE)[:rh, :rw]
+		warm_density = _box_density(warm_mask, (tw, th))[:rh, :rw]
 		result[warm_density < FLOAT_MIN_WARM_PIXELS] = -1
 
 		_, max_val, _, max_loc = cv2.minMaxLoc(result)
@@ -211,7 +211,7 @@ def find_float(screenshot_path):
 
 
 def move_mouse(place, duration=0.3, quiet=False):
-	x, y = place[0], place[1]
+	x, y = place
 	if not quiet:
 		print("Moving cursor to float at " + str(place))
 	offset_x, offset_y = game_window_bbox[0], game_window_bbox[1]
@@ -239,7 +239,7 @@ def fish_once():
 	place = locate_float()
 	if not place:
 		print('Float was not found, retrying in 3 seconds')
-		time.sleep(3)
+		stop_requested.wait(3)
 		place = locate_float()
 		if not place:
 			print('Still can\'t find float, giving up on this cast')
@@ -255,7 +255,7 @@ def fish_once():
 		return False
 
 	snatch(place)
-	time.sleep(1)
+	stop_requested.wait(1)
 	return True
 
 

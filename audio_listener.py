@@ -63,7 +63,6 @@ def listen(threshold=15, rate=None, channels=1, silence_limit_seconds=1, timeout
 	rel = rate / CHUNK
 	slid_win = deque(maxlen=math.ceil(silence_limit_seconds * rel))
 	success = False
-	max_rms_seen = 0
 	max_avg_seen = 0
 	listening_start_time = time.time()
 	while True:
@@ -72,7 +71,6 @@ def listen(threshold=15, rate=None, channels=1, silence_limit_seconds=1, timeout
 		try:
 			cur_data = stream.read(CHUNK, exception_on_overflow=False)
 			rms = audioop.rms(cur_data, 2)
-			max_rms_seen = max(max_rms_seen, rms)
 			slid_win.append(rms)
 			if len(slid_win) == slid_win.maxlen:
 				avg = sum(slid_win) / len(slid_win)

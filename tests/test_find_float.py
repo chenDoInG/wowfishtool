@@ -41,6 +41,13 @@ DESATURATED_EXPECTED_X, DESATURATED_EXPECTED_Y = 1087, 796
 BACKLIT_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'backlit_float.png')
 BACKLIT_EXPECTED_X, BACKLIT_EXPECTED_Y = 1355, 688
 
+# Flat, calm Stormwind canal water gave every template a much weaker grayscale
+# correlation than the choppy open-ocean scenes they were captured from - even a
+# hand-picked crop known to contain the float peaked next to it, not on it. Fixed by
+# adding a template captured from this exact scene rather than any matching-logic change.
+STORMWIND_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'stormwind_canal.png')
+STORMWIND_EXPECTED_X, STORMWIND_EXPECTED_Y = 1399, 576
+
 
 def test_find_float_locates_the_known_float():
 	place = find_float(FIXTURE_PATH)
@@ -88,3 +95,12 @@ def test_find_float_detects_backlit_float():
 	x, y = place
 	assert abs(x - BACKLIT_EXPECTED_X) <= TOLERANCE_PX
 	assert abs(y - BACKLIT_EXPECTED_Y) <= TOLERANCE_PX
+
+
+def test_find_float_detects_float_on_calm_canal_water():
+	place = find_float(STORMWIND_FIXTURE_PATH)
+
+	assert place is not None
+	x, y = place
+	assert abs(x - STORMWIND_EXPECTED_X) <= TOLERANCE_PX
+	assert abs(y - STORMWIND_EXPECTED_Y) <= TOLERANCE_PX
