@@ -28,6 +28,19 @@ SHIP_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'ship_fa
 SHIP_EXPECTED_X, SHIP_EXPECTED_Y = 1366, 851
 SHIP_FALSE_POSITIVE_X, SHIP_FALSE_POSITIVE_Y = 700, 440
 
+# Under overcast/dim lighting the blue feather's saturation drops well below what the
+# cool color range required, so the float was rejected as colorless and never found.
+DESATURATED_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'desaturated_feather.png')
+DESATURATED_EXPECTED_X, DESATURATED_EXPECTED_Y = 1087, 796
+
+# Backlit against a bright hazy sky, the feather's blue washed out to near the water's
+# own saturation noise floor - too close to fix with a saturation threshold, so the
+# cool-color requirement was dropped in favor of relying on the warm bobber base color
+# (still strongly saturated here) plus the search-band restriction that already
+# independently keeps distant objects like ships out.
+BACKLIT_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'backlit_float.png')
+BACKLIT_EXPECTED_X, BACKLIT_EXPECTED_Y = 1355, 688
+
 
 def test_find_float_locates_the_known_float():
 	place = find_float(FIXTURE_PATH)
@@ -57,3 +70,21 @@ def test_find_float_ignores_distant_ship():
 	assert abs(x - SHIP_EXPECTED_X) <= TOLERANCE_PX
 	assert abs(y - SHIP_EXPECTED_Y) <= TOLERANCE_PX
 	assert abs(x - SHIP_FALSE_POSITIVE_X) > TOLERANCE_PX or abs(y - SHIP_FALSE_POSITIVE_Y) > TOLERANCE_PX
+
+
+def test_find_float_detects_desaturated_feather():
+	place = find_float(DESATURATED_FIXTURE_PATH)
+
+	assert place is not None
+	x, y = place
+	assert abs(x - DESATURATED_EXPECTED_X) <= TOLERANCE_PX
+	assert abs(y - DESATURATED_EXPECTED_Y) <= TOLERANCE_PX
+
+
+def test_find_float_detects_backlit_float():
+	place = find_float(BACKLIT_FIXTURE_PATH)
+
+	assert place is not None
+	x, y = place
+	assert abs(x - BACKLIT_EXPECTED_X) <= TOLERANCE_PX
+	assert abs(y - BACKLIT_EXPECTED_Y) <= TOLERANCE_PX

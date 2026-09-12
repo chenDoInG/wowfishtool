@@ -31,16 +31,16 @@ FLOAT_SEARCH_X_RANGE = (0.25, 0.75)
 FLOAT_SEARCH_Y_RANGE = (0.38, 0.72)
 
 # Water/shoreline edges, and other objects like passing ships, occasionally out-score
-# the real float on pure grayscale template matching. The float is distinctive in
-# always having BOTH a saturated warm (orange/yellow bobber base + red feather) and
-# cool (blue feather) color right next to each other - plain water has neither, and a
-# ship's hull/sails are usually warm-colored wood/canvas without the blue. Requiring
-# a minimum of each color separately (not just their combined count) rules both out
-# regardless of how the water or a passing ship happens to look.
+# the real float on pure grayscale template matching. The float's orange/yellow bobber
+# base is reliably strongly saturated in every lighting condition seen so far - plain
+# water never has it - so requiring a minimum here rules that class of false positive
+# out regardless of how the water happens to look. The feather's blue used to be
+# required too, but under backlit/overcast lighting its saturation can wash out to
+# near the water's own noise floor, making it unreliable as a second, independent
+# check; the distant-ship case that check also caught is instead handled by
+# FLOAT_SEARCH_Y_RANGE excluding anything near the horizon.
 FLOAT_WARM_COLOR_RANGE = ((0, 90, 90), (30, 255, 255))
-FLOAT_COOL_COLOR_RANGE = ((85, 90, 90), (140, 255, 255))
 FLOAT_MIN_WARM_PIXELS = 15
-FLOAT_MIN_COOL_PIXELS = 15
 
 # The feather sticks out from the bobber base at an angle that differs per template
 # (and isn't fixed relative to the template's bounding box), so a fixed click-offset
@@ -48,10 +48,12 @@ FLOAT_MIN_COOL_PIXELS = 15
 # overshoots past the bobber on another. Instead, click the centroid of just the
 # base's narrower yellow/orange color range within the matched region of the actual
 # screenshot, which finds the real bobber regardless of which template matched.
-# The lower bound is set above the red feather's hue (~0-12) so a feather that happens
-# to be larger/brighter than the base in a given screenshot doesn't pull the centroid
-# off the base and onto the feather's tip.
-FLOAT_BASE_COLOR_RANGE = ((15, 80, 100), (35, 255, 255))
+# The lower bound is set above the red feather tip's hue (~0-8) so a feather that
+# happens to be larger/brighter than the base in a given screenshot doesn't pull the
+# centroid off the base and onto the feather's tip, while still being low enough to
+# pick up the base's own reddish-orange edge when the match window is a bit off-center
+# and the purer yellow-orange center of the base falls outside it.
+FLOAT_BASE_COLOR_RANGE = ((10, 80, 100), (35, 255, 255))
 FLOAT_MIN_BASE_COLOR_PIXELS = 15
 
 game_window_bbox = None   # (left, top, right, bottom) of the WoW window in absolute screen coords
@@ -102,13 +104,21 @@ def check_process():
 
 
 def locate_game_window():
+	"""Refresh game_window_bbox from the WoW window's current position/size.
+
+	Called before every cast, not just once at startup, since the window can be
+	moved or resized mid-session - screenshotting a stale bbox then just captures
+	whatever else is now sitting at that old location on screen.
+	"""
 	global game_window_bbox
+	previous_bbox = game_window_bbox
 	titles = [t for t in gw.getAllTitles() if t and ('魔兽世界' in t or 'warcraft' in t.lower())]
 	if titles:
 		title = titles[0]
 		left, top, width, height = gw.getWindowGeometry(title)
 		game_window_bbox = (int(left), int(top), int(left + width), int(top + height))
-		print('Found WoW window "' + title + '" at ' + str(game_window_bbox))
+		if game_window_bbox != previous_bbox:
+			print('Found WoW window "' + title + '" at ' + str(game_window_bbox))
 	else:
 		print('Could not find the WoW window, falling back to capturing the whole screen')
 		screen = ImageGrab.grab()
@@ -127,6 +137,7 @@ def jump():
 
 def locate_float():
 	"""Screenshot the game window and return the (x, y) position of the float in it, or None."""
+	locate_game_window()
 	screenshot_path = SCREENSHOT_PATH if not dev else 'var/fishing_session_' + str(int(time.time())) + '.png'
 	ImageGrab.grab(game_window_bbox).save(screenshot_path)
 	return find_float(screenshot_path)
@@ -175,14 +186,13 @@ def find_float(screenshot_path):
 		th, tw = template.shape[:2]
 		result = cv2.matchTemplate(search_area_gray, template, cv2.TM_CCOEFF_NORMED)
 
-		# Water/shoreline edges, and other objects like passing ships, can score just as
-		# well as the real float on pure grayscale correlation, but the float is the only
-		# thing that reliably has both a saturated warm AND cool color close together -
-		# rule out any position missing either one before picking the best-scoring one.
+		# Water/shoreline edges can score just as well as the real float on pure grayscale
+		# correlation, but the water is never as saturated/colorful as the float's bobber
+		# base - rule out any position that doesn't have enough of that color nearby
+		# before picking the best-scoring one.
 		rh, rw = result.shape
 		warm_density = _color_range_density(search_area_bgr, (tw, th), FLOAT_WARM_COLOR_RANGE)[:rh, :rw]
-		cool_density = _color_range_density(search_area_bgr, (tw, th), FLOAT_COOL_COLOR_RANGE)[:rh, :rw]
-		result[(warm_density < FLOAT_MIN_WARM_PIXELS) | (cool_density < FLOAT_MIN_COOL_PIXELS)] = -1
+		result[warm_density < FLOAT_MIN_WARM_PIXELS] = -1
 
 		_, max_val, _, max_loc = cv2.minMaxLoc(result)
 		if max_val > best_val:
