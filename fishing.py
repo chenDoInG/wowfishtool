@@ -3,6 +3,7 @@ import threading
 import time
 
 import cv2
+import numpy as np
 import psutil
 import pyautogui
 import pygetwindow as gw
@@ -30,33 +31,44 @@ FLOAT_MATCH_THRESHOLD = 0.3
 FLOAT_SEARCH_X_RANGE = (0.25, 0.75)
 FLOAT_SEARCH_Y_RANGE = (0.38, 0.72)
 
-# Water/shoreline edges, and other objects like passing ships, occasionally out-score
-# the real float on pure grayscale template matching. The float's orange/yellow bobber
-# base is reliably strongly saturated in every lighting condition seen so far - plain
-# water never has it - so requiring a minimum here rules that class of false positive
-# out regardless of how the water happens to look. The feather's blue used to be
-# required too, but under backlit/overcast lighting its saturation can wash out to
-# near the water's own noise floor, making it unreliable as a second, independent
-# check; the distant-ship case that check also caught is instead handled by
-# FLOAT_SEARCH_Y_RANGE excluding anything near the horizon.
-FLOAT_WARM_COLOR_RANGE = ((0, 90, 90), (30, 255, 255))
-FLOAT_MIN_WARM_PIXELS = 15
+# Water/shoreline edges, ships, and even the water itself can carry a strong, fixed
+# hue - WoW tints its lighting per-zone/time-of-day (grey overcast, blue dusk, warm
+# afternoon, ...), and that tint shifts wherever a fixed HSV hue/saturation range
+# expects to find the float's colors to be, breaking any one fixed range sooner or
+# later. What holds regardless of tint: the float's bobber+feather are always far more
+# saturated than the water immediately around them, even when that water is itself
+# fairly saturated (e.g. a deep blue dusk sea). So instead of a fixed color range,
+# measure how saturated *this* scene's water actually is and require a pixel to clear
+# that baseline by a margin to count as part of the float - adapts to the scene
+# instead of needing yet another hardcoded range for the next new lighting condition.
+FLOAT_SATURATION_BASELINE_PERCENTILE = 90
+FLOAT_SATURATION_MARGIN = 50
+FLOAT_MIN_VALUE = 60   # ignore dark/shadowed pixels regardless of saturation
+FLOAT_MIN_COLOR_PIXELS = 15
 
-# The feather sticks out from the bobber base at an angle that differs per template
-# (and isn't fixed relative to the template's bounding box), so a fixed click-offset
-# ratio doesn't generalize across templates - one template's correct offset visibly
-# overshoots past the bobber on another. Instead, click the centroid of just the
-# base's narrower yellow/orange color range within the matched region of the actual
-# screenshot, which finds the real bobber regardless of which template matched.
-# The lower bound is set above the red feather tip's hue (~0-8) so a feather that
-# happens to be larger/brighter than the base in a given screenshot doesn't pull the
-# centroid off the base and onto the feather's tip, while still being low enough to
-# pick up the base's own reddish-orange edge when the match window is a bit off-center
-# and the purer yellow-orange center of the base falls outside it.
+# A big saturated structure - a dock, a ship's hull - can clear the margin above too,
+# since it's a real, consistently-colored object rather than water noise. What it
+# never has is the float's small footprint: real detections have topped out around a
+# 46x14px blob, while a dock spans hundreds of pixels. Drop any connected blob of
+# "float-colored" pixels bigger than this in either dimension before gating on density.
+FLOAT_MAX_BLOB_SIZE = 200
+
+# The adaptive check above answers "is the float here at all" and is deliberately
+# hue-agnostic, but that also means it usually keys on the feather (its colors read as
+# more saturated than the base's yellow/tan against most water) rather than the base -
+# no good for clicking. The base's actual hue range is narrower and more predictable
+# than "whatever is more saturated than the water", so click positioning still uses it
+# directly; on the rare scene where this range doesn't find enough of it, the caller
+# falls back to the matched window's geometric center rather than failing outright.
 FLOAT_BASE_COLOR_RANGE = ((10, 80, 100), (35, 255, 255))
 FLOAT_MIN_BASE_COLOR_PIXELS = 15
 
+CAST_KEY = '1'   # fishing rod's action bar slot
+BAIT_KEY = '2'   # in-game macro that re-lures the fishing pole
+BAIT_REAPPLY_INTERVAL_SECONDS = 10 * 60 + 15   # a little past the lure's actual duration, so it never gets reapplied while the old one still has time left
+
 game_window_bbox = None   # (left, top, right, bottom) of the WoW window in absolute screen coords
+last_bait_time = None     # time.time() of the last bait application, or None if not yet applied
 
 fishing_active = threading.Event()   # set while the fishing loop should be running
 stop_requested = threading.Event()   # set when F11 asks the current session to stop
@@ -125,12 +137,6 @@ def locate_game_window():
 		game_window_bbox = (0, 0, screen.size[0], screen.size[1])
 
 
-BAIT_KEY = '2'
-BAIT_REAPPLY_INTERVAL_SECONDS = 10 * 60
-
-last_bait_time = None
-
-
 def maybe_reapply_bait():
 	"""Press BAIT_KEY (bound in-game to a macro that re-lures the fishing pole) the
 	first time this runs and again every BAIT_REAPPLY_INTERVAL_SECONDS after that."""
@@ -145,7 +151,7 @@ def maybe_reapply_bait():
 
 def send_float():
 	print('Sending float')
-	pyautogui.press('1')
+	pyautogui.press(CAST_KEY)
 	stop_requested.wait(2)
 
 
@@ -170,9 +176,33 @@ def _box_density(mask, window_size):
 	return density / 255.0
 
 
-def _float_base_color_centroid(bgr_region):
+def _drop_large_blobs(mask, max_size):
+	"""Zero out connected components of `mask` wider or taller than `max_size` - real
+	structures (a dock, a ship's hull) rather than the float's small bobber+feather."""
+	_, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+	cleaned = mask.copy()
+	for i in range(1, stats.shape[0]):
+		blob_w, blob_h = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+		if blob_w > max_size or blob_h > max_size:
+			cleaned[labels == i] = 0
+	return cleaned
+
+
+def _adaptive_color_mask(hsv_region):
+	"""Pixels distinctly more saturated than this scene's own water, regardless of what
+	hue that happens to be - see the comment on FLOAT_SATURATION_MARGIN above."""
+	saturation = hsv_region[:, :, 1]
+	value = hsv_region[:, :, 2]
+	water_baseline = np.percentile(saturation, FLOAT_SATURATION_BASELINE_PERCENTILE)
+	threshold = water_baseline + FLOAT_SATURATION_MARGIN
+	mask = ((saturation > threshold) & (value > FLOAT_MIN_VALUE)).astype(np.uint8) * 255
+	return _drop_large_blobs(mask, FLOAT_MAX_BLOB_SIZE)
+
+
+def _float_click_point(bgr_region):
 	"""Pixel-coordinate centroid of the bobber base's color within `bgr_region`, or None
-	if there aren't enough matching pixels to trust (falls back to the geometric center)."""
+	if there aren't enough matching pixels to trust it (caller falls back to the
+	geometric center in that case)."""
 	hsv = cv2.cvtColor(bgr_region, cv2.COLOR_BGR2HSV)
 	mask = cv2.inRange(hsv, FLOAT_BASE_COLOR_RANGE[0], FLOAT_BASE_COLOR_RANGE[1])
 	moments = cv2.moments(mask, binaryImage=True)
@@ -192,7 +222,7 @@ def find_float(screenshot_path):
 	search_area_gray = img_gray[search_y0:search_y1, search_x0:search_x1]
 	search_area_bgr = img_bgr[search_y0:search_y1, search_x0:search_x1]
 	search_area_hsv = cv2.cvtColor(search_area_bgr, cv2.COLOR_BGR2HSV)
-	warm_mask = cv2.inRange(search_area_hsv, FLOAT_WARM_COLOR_RANGE[0], FLOAT_WARM_COLOR_RANGE[1])
+	color_mask = _adaptive_color_mask(search_area_hsv)
 
 	best_val = 0
 	best_loc = None
@@ -209,8 +239,8 @@ def find_float(screenshot_path):
 		# base - rule out any position that doesn't have enough of that color nearby
 		# before picking the best-scoring one.
 		rh, rw = result.shape
-		warm_density = _box_density(warm_mask, (tw, th))[:rh, :rw]
-		result[warm_density < FLOAT_MIN_WARM_PIXELS] = -1
+		color_density = _box_density(color_mask, (tw, th))[:rh, :rw]
+		result[color_density < FLOAT_MIN_COLOR_PIXELS] = -1
 
 		_, max_val, _, max_loc = cv2.minMaxLoc(result)
 		if max_val > best_val:
@@ -222,9 +252,9 @@ def find_float(screenshot_path):
 	tw, th = best_size
 	tl = (best_loc[0] + search_x0, best_loc[1] + search_y0)   # top-left, back in full-screenshot coordinates
 	matched_region = img_bgr[tl[1]:tl[1] + th, tl[0]:tl[0] + tw]
-	base_center = _float_base_color_centroid(matched_region)
-	if base_center is not None:
-		return tl[0] + base_center[0], tl[1] + base_center[1]
+	click_point = _float_click_point(matched_region)
+	if click_point is not None:
+		return tl[0] + click_point[0], tl[1] + click_point[1]
 	return tl[0] + tw / 2, tl[1] + th / 2
 
 

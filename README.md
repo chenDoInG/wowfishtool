@@ -90,7 +90,8 @@ LOOPBACK_NAME_HINT = 'cable'
 ```
 
 脚本会在开始钓鱼时先按一次 `2`,之后每隔 `fishing.py` 里
-`BAIT_REAPPLY_INTERVAL_SECONDS`(默认 10 分钟)自动再按一次,不用手动操作。如果你的鱼竿在
+`BAIT_REAPPLY_INTERVAL_SECONDS`(默认 10 分钟多一点,故意留了几秒余量避免鱼饵还没到期就被
+提前刷新)自动再按一次,不用手动操作。如果你的鱼竿在
 副手栏位,把宏里的 `/use 16` 改成 `/use 17`;如果快捷键不是 2,改 `fishing.py` 里的
 `BAIT_KEY`。
 
