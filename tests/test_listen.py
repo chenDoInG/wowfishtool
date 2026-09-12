@@ -3,11 +3,14 @@
 This needs a real microphone and a human making noise, so it's not an automated
 pass/fail test - it prints what it's doing so you can judge the result yourself.
 """
+import os
+import sys
 import time
 
 import pyaudio
 import audioop
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from audio_listener import listen, find_loopback_device_index
 
 
@@ -74,6 +77,6 @@ if __name__ == '__main__':
 	print()
 
 	print('=== Step 2: run the real listen() bite-detection function ===')
-	print('Default THRESHOLD=1200. It waits up to 20s for a sound to cross it.')
-	result = listen(threshold=1200, device_index=loopback_index)
+	print('Default THRESHOLD=15. It waits up to 20s for a sustained loud sound.')
+	result = listen(device_index=loopback_index)
 	print('listen() returned: ' + str(result))

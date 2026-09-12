@@ -5,9 +5,11 @@ overwritten every time the bot actually runs) with a known, visually-verified fl
 position, so tuning FLOAT_MATCH_THRESHOLD / FLOAT_SEARCH_X_RANGE /
 FLOAT_CLICK_X_OFFSET_RATIO later can't silently break detection without a test failing.
 """
+import os
+
 from fishing import find_float
 
-FIXTURE_PATH = 'tests/fixtures/sample_screenshot.png'
+FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'sample_screenshot.png')
 EXPECTED_X, EXPECTED_Y = 1362.75, 660.5
 TOLERANCE_PX = 20
 
