@@ -66,7 +66,7 @@ CLICK_SEARCH_PADDING_BOTTOM_RATIO = 0.5
 CLICK_SEARCH_PADDING_X_RATIO = 0.3
 
 
-def _box_density(mask, window_size):
+def _box_density(mask: np.ndarray, window_size):
 	"""Per-pixel count of nonzero `mask` pixels in a window_size box anchored at that
 	pixel's top-left, i.e. density[y, x] covers the same box matchTemplate's
 	result[y, x] scores."""
@@ -75,7 +75,7 @@ def _box_density(mask, window_size):
 	return density / 255.0
 
 
-def _drop_large_blobs(mask, max_size):
+def _drop_large_blobs(mask: np.ndarray, max_size: int):
 	"""Zero out connected components of `mask` wider or taller than `max_size` - real
 	structures (a dock, a ship's hull) rather than the float's small bobber+feather."""
 	_, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
@@ -87,7 +87,7 @@ def _drop_large_blobs(mask, max_size):
 	return cleaned
 
 
-def _adaptive_color_mask(hsv_region):
+def _adaptive_color_mask(hsv_region: np.ndarray):
 	"""Pixels distinctly more saturated than this scene's own water, regardless of what
 	hue that happens to be - see the comment on FLOAT_SATURATION_MARGIN above."""
 	saturation = hsv_region[:, :, 1]
@@ -98,7 +98,7 @@ def _adaptive_color_mask(hsv_region):
 	return _drop_large_blobs(mask, FLOAT_MAX_BLOB_SIZE)
 
 
-def _float_click_point(bgr_region):
+def _float_click_point(bgr_region: np.ndarray):
 	"""Pixel-coordinate centroid of the bobber base's color within `bgr_region`, or None
 	if there aren't enough matching pixels to trust it (caller falls back to the
 	geometric center in that case)."""
@@ -127,14 +127,15 @@ def find_float(screenshot_path):
 		# crashing the whole bot over, so log it and treat it like "not found".
 		print('Could not read screenshot: ' + screenshot_path)
 		return None
+	# noinspection PyTypeChecker
 	img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 	h, w = img_gray.shape[:2]
 
 	search_x0, search_x1 = int(w * FLOAT_SEARCH_X_RANGE[0]), int(w * FLOAT_SEARCH_X_RANGE[1])
 	search_y0, search_y1 = int(h * FLOAT_SEARCH_Y_RANGE[0]), int(h * FLOAT_SEARCH_Y_RANGE[1])
-	search_area_gray = img_gray[search_y0:search_y1, search_x0:search_x1]
-	search_area_bgr = img_bgr[search_y0:search_y1, search_x0:search_x1]
-	search_area_hsv = cv2.cvtColor(search_area_bgr, cv2.COLOR_BGR2HSV)
+	search_area_gray: np.ndarray = img_gray[search_y0:search_y1, search_x0:search_x1]
+	search_area_bgr: np.ndarray = img_bgr[search_y0:search_y1, search_x0:search_x1]
+	search_area_hsv: np.ndarray = cv2.cvtColor(search_area_bgr, cv2.COLOR_BGR2HSV)
 	color_mask = _adaptive_color_mask(search_area_hsv)
 
 	best_val = 0
@@ -160,7 +161,7 @@ def find_float(screenshot_path):
 		if max_val > best_val:
 			best_val, best_loc, best_size, best_template = max_val, max_loc, (tw, th), template_path
 
-	if best_val <= FLOAT_MATCH_THRESHOLD or best_loc is None:
+	if best_val <= FLOAT_MATCH_THRESHOLD or best_loc is None or best_template is None or best_size is None:
 		return None
 
 	print('Matched ' + best_template + ' (score ' + str(round(best_val, 3)) + ')')
@@ -178,7 +179,7 @@ def find_float(screenshot_path):
 	pad_bottom = int(th * CLICK_SEARCH_PADDING_BOTTOM_RATIO)
 	click_x0, click_y0 = max(0, tl[0] - pad_x), max(0, tl[1] - pad_top)
 	click_x1, click_y1 = min(w, tl[0] + tw + pad_x), min(h, tl[1] + th + pad_bottom)
-	matched_region = img_bgr[click_y0:click_y1, click_x0:click_x1]
+	matched_region: np.ndarray = img_bgr[click_y0:click_y1, click_x0:click_x1]
 	click_point = _float_click_point(matched_region)
 	if click_point is not None:
 		return click_x0 + click_point[0], click_y0 + click_point[1]
