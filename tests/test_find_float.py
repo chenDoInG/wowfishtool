@@ -2,12 +2,12 @@
 
 Uses frozen sample screenshots (not the live var/fishing_session.png, which gets
 overwritten every time the bot actually runs) with known, visually-verified float
-positions, so tuning the matching/color-gating constants in fishing.py later can't
-silently break detection without a test failing.
+positions, so tuning the matching/color-gating constants in float_detector.py later
+can't silently break detection without a test failing.
 """
 import os
 
-from fishing import find_float
+from float_detector import find_float
 
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'sample_screenshot.png')
 EXPECTED_X, EXPECTED_Y = 1362.75, 660.5

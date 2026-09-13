@@ -107,7 +107,7 @@ LOOPBACK_NAME_HINT = 'cable'
 3. 存成 `var/fishing_float_3.png`(数字接着现有的往后排,不冲突就行)
 4. 重新跑一次,不用改代码,`find_float()` 会自动把这张新模板也纳入比较
 
-注意鱼漂只会出现在角色前方的水面这一片区域(`fishing.py` 里
+注意鱼漂只会出现在角色前方的水面这一片区域(`float_detector.py` 里
 `FLOAT_SEARCH_X_RANGE`/`FLOAT_SEARCH_Y_RANGE` 定义的范围),截图时保证摄像机角度和平时钓鱼
 差不多就行,不用整张图都很干净。
 
