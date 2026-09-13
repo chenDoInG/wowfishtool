@@ -49,9 +49,20 @@ FLOAT_MAX_BLOB_SIZE = 200
 # more saturated than the base's yellow/tan against most water) rather than the base -
 # no good for clicking. The base's actual hue range is narrower and more predictable
 # than "whatever is more saturated than the water", so click positioning still uses it
-# directly; on the rare scene where this range doesn't find enough of it, the caller
+# directly; on the rare scene where none of these ranges find enough of it, the caller
 # falls back to the matched window's geometric center rather than failing outright.
-FLOAT_BASE_COLOR_RANGE = ((10, 80, 100), (35, 255, 255))
+#
+# More than one range exists because ambient lighting tints the base's color along with
+# everything else - a dusk/night zone can shift it from its usual warm tan (hue ~10-35,
+# strongly saturated) to a desaturated yellow-green (hue ~40-75, only weakly saturated).
+# Each range is kept narrow and scene-specific rather than widening one range to cover
+# both, since a wide range risks bleeding into water that happens to sit in the gap
+# between them in some other scene (e.g. one daylight fixture's water itself reads at
+# roughly hue 47 - right where a single, wider range would have to pass through).
+FLOAT_BASE_COLOR_RANGES = (
+	((10, 80, 100), (35, 255, 255)),   # normal daylight warm tan/yellow base
+	((40, 30, 120), (75, 90, 255)),    # dusk/night-tinted, desaturated base
+)
 FLOAT_MIN_BASE_COLOR_PIXELS = 15
 
 # How far beyond the matched template's own box to look for the base's color - see the
@@ -103,7 +114,9 @@ def _float_click_point(bgr_region: np.ndarray):
 	if there aren't enough matching pixels to trust it (caller falls back to the
 	geometric center in that case)."""
 	hsv = cv2.cvtColor(bgr_region, cv2.COLOR_BGR2HSV)
-	mask = cv2.inRange(hsv, FLOAT_BASE_COLOR_RANGE[0], FLOAT_BASE_COLOR_RANGE[1])
+	mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+	for lo, hi in FLOAT_BASE_COLOR_RANGES:
+		mask |= cv2.inRange(hsv, lo, hi)
 	# The padded search region below can reach into a same-hued background structure
 	# (e.g. the wooden dock in the Stormwind fixture) - drop any blob too big to be the
 	# float's own base before centroiding, same rationale as _drop_large_blobs above.
