@@ -157,7 +157,12 @@ def maybe_reapply_bait():
 def send_float():
 	print('Sending float')
 	pyautogui.press(CAST_KEY)
-	stop_requested.wait(2)
+	# The cast animation takes about this long before the bobber actually lands and
+	# settles in the water - screenshotting any earlier catches it still mid-air/still
+	# animating in, which find_float() then just fails to match. If it starts missing
+	# the float often (check the "Xs since cast" logged on a successful find), this
+	# needs to go back up rather than lower.
+	stop_requested.wait(1.5)
 
 
 def jump():
@@ -217,8 +222,18 @@ def _float_click_point(bgr_region):
 
 
 def find_float(screenshot_path):
-	# todo: maybe make some universal float without background?
+	# Tried masked template matching (matchTemplate(..., mask=...) so the background
+	# water can't affect the score) to get one "universal" background-free template
+	# instead of several lighting-specific ones - scores looked great (0.97+) but
+	# locations were wildly wrong (100-500px off), since a sparse color-only mask
+	# throws away the float's shape and just matches any similarly-colored blob. Not
+	# worth revisiting without a much more careful mask.
 	img_bgr = cv2.imread(screenshot_path)
+	if img_bgr is None:
+		# e.g. a screenshot caught mid-write by a concurrent reader - not worth
+		# crashing the whole bot over, so log it and treat it like "not found".
+		print('Could not read screenshot: ' + screenshot_path)
+		return None
 	img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 	h, w = img_gray.shape[:2]
 
@@ -232,6 +247,7 @@ def find_float(screenshot_path):
 	best_val = 0
 	best_loc = None
 	best_size = None
+	best_template = None
 	for template_path in sorted(glob.glob(FLOAT_TEMPLATE_GLOB)):
 		template = cv2.imread(template_path, 0)
 		if template is None:
@@ -249,10 +265,12 @@ def find_float(screenshot_path):
 
 		_, max_val, _, max_loc = cv2.minMaxLoc(result)
 		if max_val > best_val:
-			best_val, best_loc, best_size = max_val, max_loc, (tw, th)
+			best_val, best_loc, best_size, best_template = max_val, max_loc, (tw, th), template_path
 
 	if best_val <= FLOAT_MATCH_THRESHOLD or best_loc is None:
 		return None
+
+	print('Matched ' + best_template + ' (score ' + str(round(best_val, 3)) + ')')
 
 	tw, th = best_size
 	tl = (best_loc[0] + search_x0, best_loc[1] + search_y0)   # top-left, back in full-screenshot coordinates
@@ -263,10 +281,13 @@ def find_float(screenshot_path):
 	return tl[0] + tw / 2, tl[1] + th / 2
 
 
-def move_mouse(place, duration=0.3, quiet=False):
+def move_mouse(place, duration=0.3, quiet=False, elapsed_since_cast=None):
 	x, y = place
 	if not quiet:
-		print("Moving cursor to float at " + str(place))
+		msg = "Moving cursor to float at " + str(place)
+		if elapsed_since_cast is not None:
+			msg += " (%.1fs since cast)" % elapsed_since_cast
+		print(msg)
 	offset_x, offset_y = game_window_bbox[0], game_window_bbox[1]
 	pyautogui.moveTo(offset_x + x, offset_y + y, duration=duration)
 
@@ -289,6 +310,7 @@ def fish_once():
 	if stop_requested.is_set():
 		return False
 
+	cast_time = time.time()
 	send_float()
 	if stop_requested.is_set():
 		return False
@@ -303,7 +325,7 @@ def fish_once():
 			jump()
 			return False
 
-	move_mouse(place)
+	move_mouse(place, elapsed_since_cast=time.time() - cast_time)
 	if not listen(stop_event=stop_requested):
 		print('Didn\'t hear a bite, trying again')
 		jump()
