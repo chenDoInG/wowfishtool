@@ -76,6 +76,17 @@ CLICK_SEARCH_PADDING_TOP_RATIO = 0
 CLICK_SEARCH_PADDING_BOTTOM_RATIO = 0.5
 CLICK_SEARCH_PADDING_X_RATIO = 0.3
 
+# Where the base sits vertically within the matched box, as a fraction of its height -
+# used only when _float_click_point() can't find the base's own color at all (a scene
+# where the base blends into the water too closely for any fixed range to separate, e.g.
+# max graphics quality rendering the same dusk tint far more strongly onto every object).
+# The two known scenes that fall back to this were both measured against their real,
+# manually-verified float position: the base sits at ~65% of the box's height, not 50% -
+# the feather it's attached to occupies the upper portion, pulling the box's own vertical
+# center up past the base. Horizontal centering is left alone since both scenes' real
+# position landed exactly on the box's horizontal center already.
+FALLBACK_VERTICAL_BIAS = 0.65
+
 
 def _box_density(mask: np.ndarray, window_size):
 	"""Per-pixel count of nonzero `mask` pixels in a window_size box anchored at that
@@ -196,4 +207,4 @@ def find_float(screenshot_path):
 	click_point = _float_click_point(matched_region)
 	if click_point is not None:
 		return click_x0 + click_point[0], click_y0 + click_point[1]
-	return tl[0] + tw / 2, tl[1] + th / 2
+	return tl[0] + tw / 2, tl[1] + th * FALLBACK_VERTICAL_BIAS

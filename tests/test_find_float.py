@@ -60,8 +60,8 @@ STORMWIND_FALSE_POSITIVE_X, STORMWIND_FALSE_POSITIVE_Y = 1304, 898
 # scene's own water instead of a fixed absolute range.
 DUSK_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'dusk_saturated_water.png')
 DUSK_EXPECTED_X, DUSK_EXPECTED_Y = 1245, 695
-DUSK_TOLERANCE_PX = 35   # the base's own hue is shifted too, so the click centroid
-# falls back to the matched window's geometric center here - less precise than usual
+DUSK_TOLERANCE_PX = 10   # the base's own hue is shifted too, so the click centroid falls
+# back to FALLBACK_VERTICAL_BIAS (see float_detector.py) rather than a real color match
 
 # An even more saturated sea plateaued right up through its own 99th percentile before
 # jumping sharply at the float's outlier pixels - baselining off the 90th percentile
@@ -70,7 +70,7 @@ DUSK_TOLERANCE_PX = 35   # the base's own hue is shifted too, so the click centr
 # instead, which sits on that plateau rather than already inside the jump.
 EXTREME_DUSK_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'extreme_dusk_saturation.png')
 EXTREME_DUSK_EXPECTED_X, EXTREME_DUSK_EXPECTED_Y = 1027, 708
-EXTREME_DUSK_TOLERANCE_PX = 35   # same hue-shifted-base caveat as the dusk case above
+EXTREME_DUSK_TOLERANCE_PX = 10   # same fallback caveat as the dusk case above
 
 
 def test_find_float_locates_the_known_float():
