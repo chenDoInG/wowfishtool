@@ -1,3 +1,4 @@
+import sys
 import threading
 import time
 
@@ -19,6 +20,7 @@ SCREENSHOT_PATH = 'var/fishing_session.png'
 CAST_KEY = '1'   # fishing rod's action bar slot
 BAIT_KEY = '2'   # in-game macro that re-lures the fishing pole
 BAIT_REAPPLY_INTERVAL_SECONDS = 10 * 60 + 15   # a little past the lure's actual duration, so it never gets reapplied while the old one still has time left
+MAX_CONSECUTIVE_MISSES = 10   # this many fish_once() calls in a row without a catch means something's actually wrong (window moved, wrong zone, game state stuck) rather than just bad luck - stop instead of grinding uselessly
 
 game_window_bbox = None   # (left, top, right, bottom) of the WoW window in absolute screen coords
 last_bait_time = None     # time.time() of the last bait application, or None if not yet applied
@@ -63,7 +65,7 @@ def check_process():
 	running = is_wow_running()
 	if not running and not dev:
 		print('WoW is not running')
-		exit()
+		sys.exit()
 	print('WoW is running')
 	return running
 
@@ -113,10 +115,6 @@ def send_float():
 	stop_requested.wait(2)
 
 
-def jump():
-	stop_requested.wait(1)
-
-
 def locate_float():
 	"""Screenshot the game window and return the (x, y) position of the float in it, or None."""
 	locate_game_window()
@@ -161,23 +159,24 @@ def fish_once():
 
 	place = locate_float()
 	if not place:
-		print('Float was not found, retrying in 3 seconds')
-		stop_requested.wait(3)
+		print('Float was not found, retrying in 0.5 seconds')
+		stop_requested.wait(0.5)
 		place = locate_float()
 		if not place:
 			print('Still can\'t find float, giving up on this cast')
-			jump()
 			return False
 
 	move_mouse(place, elapsed_since_cast=time.time() - cast_time)
 	if not listen(stop_event=stop_requested):
 		print('Didn\'t hear a bite, trying again')
-		jump()
 		return False
 	if stop_requested.is_set():
 		return False
 
 	snatch(place)
+	# Give the client a moment to actually register the catch before the next
+	# cast - the give-up paths above skip this since there's nothing to let
+	# settle, they just go straight to recasting.
 	stop_requested.wait(1)
 	return True
 
@@ -193,16 +192,20 @@ def main():
 
 	while not dev:
 		fishing_active.wait()
-		if stop_requested.is_set():
-			fishing_active.clear()
-			continue
 
-		catched = 0
+		caught = 0
+		consecutive_misses = 0
 		while fishing_active.is_set() and not stop_requested.is_set():
 			if fish_once():
-				catched += 1
+				caught += 1
+				consecutive_misses = 0
+			else:
+				consecutive_misses += 1
+				if consecutive_misses >= MAX_CONSECUTIVE_MISSES:
+					print(str(consecutive_misses) + ' misses in a row, something looks wrong - stopping')
+					break
 
-		print('catched ' + str(catched))
+		print('caught ' + str(caught))
 		fishing_active.clear()
 		print('Stopped. Press F10 to start again.')
 
