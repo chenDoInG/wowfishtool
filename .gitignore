@@ -4,3 +4,4 @@ __pycache__/
 .DS_Store
 .idea/
 var/fishing_session.png
+var/debug_*.png
