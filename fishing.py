@@ -138,7 +138,7 @@ def move_mouse(place, duration=0.3, quiet=False, elapsed_since_cast=None):
 
 
 def snatch(place):
-	print('Snatching!')
+	print('Snatching at ' + time.strftime('%H:%M:%S') + '!')
 	# The mouse has usually been sitting still on the float for up to 20s while
 	# listen() waited. WoW seems to only refresh what object is under the cursor
 	# when it sees a real mouse-move event, and the float's bobbing animation can
