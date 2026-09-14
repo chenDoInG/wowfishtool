@@ -149,6 +149,30 @@ def snatch(place):
 	pyautogui.click(button='right')
 
 
+def try_recover_from_disconnect():
+	"""Best-effort recovery for the case where MAX_CONSECUTIVE_MISSES was actually caused
+	by getting disconnected (the "已从服务器断开" dialog), not a detection problem: press
+	Enter three times, a couple seconds apart, on the guess that Enter activates whatever
+	button the disconnect dialog and the login/realm/character-select screens after it
+	leave focused. No visual confirmation this actually worked - it's a cheap, harmless
+	guess to try before giving up for good, not a real reconnect flow.
+
+	UNVERIFIED: the 3-presses-then-loading-screen sequence and the 8s wait below are
+	from memory, not measured - actually reproducing a disconnect requires the server to
+	kick us, not something to trigger on demand. Adjust once it's actually been observed
+	firing for real."""
+	print('Trying Enter x3 in case this is a disconnect, not a detection problem')
+	pyautogui.press('enter')
+	stop_requested.wait(2)
+	pyautogui.press('enter')
+	stop_requested.wait(2)
+	pyautogui.press('enter')
+	# If this really was a disconnect, this third Enter is the one that re-enters the
+	# world, which triggers a loading screen - give that more room than the 2s gaps
+	# above before anything else tries to act on the (still loading) game window.
+	stop_requested.wait(8)
+
+
 def fish_once():
 	"""Cast, wait for a bite and try to catch it. Returns True if a fish was caught."""
 	maybe_reapply_bait()
@@ -206,15 +230,23 @@ def main():
 
 		caught = 0
 		consecutive_misses = 0
+		tried_recovery = False
 		while fishing_active.is_set() and not stop_requested.is_set():
 			if fish_once():
 				caught += 1
 				consecutive_misses = 0
+				tried_recovery = False
 			else:
 				consecutive_misses += 1
 				if consecutive_misses >= MAX_CONSECUTIVE_MISSES:
-					print(str(consecutive_misses) + ' misses in a row, something looks wrong - stopping')
-					break
+					if not tried_recovery:
+						print(str(consecutive_misses) + ' misses in a row - might be a disconnect, trying to recover')
+						try_recover_from_disconnect()
+						consecutive_misses = 0
+						tried_recovery = True
+					else:
+						print(str(MAX_CONSECUTIVE_MISSES) + ' misses in a row even after trying to recover - stopping')
+						break
 
 		print('caught ' + str(caught))
 		fishing_active.clear()
