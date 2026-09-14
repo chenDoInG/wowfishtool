@@ -11,11 +11,19 @@ FLOAT_MATCH_THRESHOLD = 0.3
 # of the window, well below the horizon and anything far off on it (a distant ship, say).
 # Restricting the search to this band keeps that class of thing, and repetitive
 # water-ripple texture elsewhere on screen, from out-scoring the real float. Every
-# confirmed-real detection logged so far has landed between 45% and 60% of the window's
+# confirmed-real detection logged so far has landed between 45% and 77% of the window's
 # height; a nearby ship is far more likely to sit above that than a closer cast is to
 # land below it, hence the lower bound sitting much closer to the observed range.
+#
+# The upper end of that range varies more than expected across different window/camera
+# setups - one real session consistently landed casts around 74-77%, well past the 72%
+# this used to stop at. That's not a color or shape problem at all: cropping the float
+# out of the search band before matching even starts means no amount of tuning the color
+# gate or templates can recover it, since the pixels just aren't in the region being
+# analyzed. Pad the upper bound well past every real detection logged so far instead of
+# exactly to it, so the next new camera setup doesn't clip the same way.
 FLOAT_SEARCH_X_RANGE = (0.25, 0.75)
-FLOAT_SEARCH_Y_RANGE = (0.38, 0.72)
+FLOAT_SEARCH_Y_RANGE = (0.38, 0.80)
 
 # Water/shoreline edges, ships, and even the water itself can carry a strong, fixed
 # hue - WoW tints its lighting per-zone/time-of-day (grey overcast, blue dusk, warm
