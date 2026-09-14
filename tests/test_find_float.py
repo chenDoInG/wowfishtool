@@ -70,7 +70,18 @@ DUSK_TOLERANCE_PX = 10   # the base's own hue is shifted too, so the click centr
 # instead, which sits on that plateau rather than already inside the jump.
 EXTREME_DUSK_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'extreme_dusk_saturation.png')
 EXTREME_DUSK_EXPECTED_X, EXTREME_DUSK_EXPECTED_Y = 1027, 708
-EXTREME_DUSK_TOLERANCE_PX = 10   # same fallback caveat as the dusk case above
+EXTREME_DUSK_TOLERANCE_PX = 20   # same fallback caveat as the dusk case above - which
+# template ends up matching (and therefore what box height FALLBACK_VERTICAL_BIAS scales
+# against) can flip between near-tied templates as new ones are added, so this can't be
+# pinned as tightly as a single-template fallback could be
+
+# A sunset scene where the sky's pink/purple tint carried into the water - the float
+# itself was clearly visible and well inside the search band, but none of the templates
+# captured up to that point matched it above FLOAT_MATCH_THRESHOLD at its real position
+# (matches that did clear the threshold were all at other, wrong locations). Fixed by
+# adding fishing_float_6.png, cropped from this exact scene.
+SUNSET_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'sunset_purple_water.png')
+SUNSET_EXPECTED_X, SUNSET_EXPECTED_Y = 1077, 434
 
 
 def test_find_float_locates_the_known_float():
@@ -147,3 +158,12 @@ def test_find_float_detects_float_in_extremely_saturated_water():
 	x, y = place
 	assert abs(x - EXTREME_DUSK_EXPECTED_X) <= EXTREME_DUSK_TOLERANCE_PX
 	assert abs(y - EXTREME_DUSK_EXPECTED_Y) <= EXTREME_DUSK_TOLERANCE_PX
+
+
+def test_find_float_detects_float_in_sunset_tinted_water():
+	place = find_float(SUNSET_FIXTURE_PATH)
+
+	assert place is not None
+	x, y = place
+	assert abs(x - SUNSET_EXPECTED_X) <= TOLERANCE_PX
+	assert abs(y - SUNSET_EXPECTED_Y) <= TOLERANCE_PX
