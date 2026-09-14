@@ -1,3 +1,5 @@
+import os
+import shutil
 import sys
 import threading
 import time
@@ -8,6 +10,7 @@ import pygetwindow as gw
 import pyscreenshot as ImageGrab
 from pynput import keyboard
 
+import float_detector
 from audio_listener import listen
 from float_detector import find_float
 
@@ -163,7 +166,15 @@ def fish_once():
 		stop_requested.wait(0.5)
 		place = locate_float()
 		if not place:
-			print('Still can\'t find float, giving up on this cast')
+			if float_detector.DEBUG_SNAPSHOTS:
+				# SCREENSHOT_PATH gets overwritten by the next cast, so preserve this
+				# one under a unique name before it's gone.
+				os.makedirs(float_detector.DEBUG_SNAPSHOT_DIR, exist_ok=True)
+				debug_path = os.path.join(float_detector.DEBUG_SNAPSHOT_DIR, 'notfound_' + str(int(time.time())) + '.png')
+				shutil.copy(SCREENSHOT_PATH, debug_path)
+				print('Still can\'t find float, giving up on this cast - saved ' + debug_path + ' for review')
+			else:
+				print('Still can\'t find float, giving up on this cast')
 			return False
 
 	move_mouse(place, elapsed_since_cast=time.time() - cast_time)

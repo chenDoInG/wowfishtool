@@ -1,4 +1,6 @@
 import glob
+import os
+import time
 
 import cv2
 import numpy as np
@@ -95,6 +97,14 @@ CLICK_SEARCH_PADDING_X_RATIO = 0.3
 # position landed exactly on the box's horizontal center already.
 FALLBACK_VERTICAL_BIAS = 0.65
 
+# Off by default so a normal run never touches disk for this - flip to True (fishing.py
+# does this for you when its own DEBUG_SNAPSHOTS is set, see there) to save an annotated
+# screenshot into DEBUG_SNAPSHOT_DIR any time the click point falls back to the matched
+# box's geometric center (see the comment where this is used in find_float()), for
+# reviewing after the fact instead of only when a bad catch happens to get noticed.
+DEBUG_SNAPSHOTS = False
+DEBUG_SNAPSHOT_DIR = 'debug'   # kept out of var/, which holds the bot's real runtime data
+
 
 def _box_density(mask: np.ndarray, window_size):
 	"""Per-pixel count of nonzero `mask` pixels in a window_size box anchored at that
@@ -144,6 +154,23 @@ def _float_click_point(bgr_region: np.ndarray):
 	if moments['m00'] < FLOAT_MIN_BASE_COLOR_PIXELS:
 		return None
 	return moments['m10'] / moments['m00'], moments['m01'] / moments['m00']
+
+
+def _save_fallback_debug_snapshot(img_bgr: np.ndarray, box_tl, box_size, click_point):
+	"""If DEBUG_SNAPSHOTS is on, save a copy of the screenshot (with the matched box and
+	click point drawn on it) into DEBUG_SNAPSHOT_DIR, so a click that had to fall back to
+	the geometric center (see find_float()) can be checked after the fact instead of only
+	when the user happens to notice a bad catch. No-op otherwise."""
+	if not DEBUG_SNAPSHOTS:
+		return
+	os.makedirs(DEBUG_SNAPSHOT_DIR, exist_ok=True)
+	tw, th = box_size
+	annotated = img_bgr.copy()
+	cv2.rectangle(annotated, box_tl, (box_tl[0] + tw, box_tl[1] + th), (0, 255, 0), 2)
+	cv2.circle(annotated, (int(click_point[0]), int(click_point[1])), 6, (0, 0, 255), -1)
+	path = os.path.join(DEBUG_SNAPSHOT_DIR, 'fallback_' + str(int(time.time())) + '.png')
+	cv2.imwrite(path, annotated)
+	print('Click point fell back to the matched box\'s center - saved ' + path + ' for review')
 
 
 def find_float(screenshot_path):
@@ -215,4 +242,7 @@ def find_float(screenshot_path):
 	click_point = _float_click_point(matched_region)
 	if click_point is not None:
 		return click_x0 + click_point[0], click_y0 + click_point[1]
-	return tl[0] + tw / 2, tl[1] + th * FALLBACK_VERTICAL_BIAS
+
+	fallback_point = (tl[0] + tw / 2, tl[1] + th * FALLBACK_VERTICAL_BIAS)
+	_save_fallback_debug_snapshot(img_bgr, tl, best_size, fallback_point)
+	return fallback_point
