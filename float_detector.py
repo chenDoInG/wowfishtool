@@ -6,7 +6,15 @@ import cv2
 import numpy as np
 
 FLOAT_TEMPLATE_GLOB = 'var/fishing_float_*.png'
-FLOAT_MATCH_THRESHOLD = 0.3
+
+# Every confirmed-real match logged so far has scored 0.439 or higher (even in the
+# hardest lighting fixtures). A real miss - a hazy scene where the color gate found zero
+# density at the float's own true position, so only a stray water-texture match survived
+# the gate at all - scored 0.330: comfortably below that floor. Sitting the threshold in
+# the gap between the two means a match this weak now gets treated like "not found"
+# (a quick retry) instead of confidently committing to a wrong location and then wasting
+# a full listen() timeout waiting for a bite that was never coming.
+FLOAT_MATCH_THRESHOLD = 0.35
 
 # The float always lands in the water close to the character, which - because a nearby
 # point on the water is lower in the view than a distant one - puts it in the lower part
