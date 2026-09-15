@@ -157,20 +157,27 @@ def try_recover_from_disconnect():
 	leave focused. No visual confirmation this actually worked - it's a cheap, harmless
 	guess to try before giving up for good, not a real reconnect flow.
 
-	UNVERIFIED: the 3-presses-then-loading-screen sequence and the 8s wait below are
-	from memory, not measured - actually reproducing a disconnect requires the server to
-	kick us, not something to trigger on demand. Adjust once it's actually been observed
-	firing for real."""
+	PARTIALLY VERIFIED: a real disconnect confirmed the first two presses do get through
+	the disconnect dialog and login/realm-select screens - a debug_notfound snapshot
+	caught it sitting on the character-select screen (the right character highlighted,
+	"进入魔兽世界" button visible) afterward. But the gap between the 2nd and 3rd press
+	wasn't enough for character-select to actually finish loading/settle before the 3rd
+	Enter fired, so it never actually entered the world - widened twice now (2s -> 5s ->
+	10s); still unverified whether it's enough yet. Same for the final wait (entering the
+	world triggers its own loading screen) - widened once (8s -> 18s), also unverified."""
 	print('Trying Enter x3 in case this is a disconnect, not a detection problem')
 	pyautogui.press('enter')
 	stop_requested.wait(2)
 	pyautogui.press('enter')
-	stop_requested.wait(2)
+	# Character-select needs to finish loading (and the right character be selected)
+	# before Enter there activates "进入魔兽世界" - shorter waits used here before gave up
+	# too early, leaving it sitting on this screen instead of actually entering the world.
+	stop_requested.wait(10)
 	pyautogui.press('enter')
 	# If this really was a disconnect, this third Enter is the one that re-enters the
-	# world, which triggers a loading screen - give that more room than the 2s gaps
+	# world, which triggers a loading screen - give that more room than the 2s gap
 	# above before anything else tries to act on the (still loading) game window.
-	stop_requested.wait(8)
+	stop_requested.wait(18)
 
 
 def fish_once():
