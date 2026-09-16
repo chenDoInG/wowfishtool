@@ -1,12 +1,18 @@
-opencv-python==5.0.0.93
-numpy==2.0.2
-pyscreenshot==3.1
-pyautogui==0.9.54
-pygetwindow==0.0.9
-psutil==7.2.2
-pynput==1.8.2
-pyaudio==0.2.14
+# >= instead of == on purpose: a package version pinned exactly to what was tested here
+# can lack a precompiled wheel for whatever Python version someone installs later (numpy
+# especially - it ships version-specific wheels, not a stable-ABI one), which forces pip
+# to build from source and fail without a C compiler installed. >= lets pip pick whatever
+# newer version actually has a wheel for the Python you're on, while still keeping the
+# tested version as a floor.
+opencv-python>=5.0.0.93
+numpy>=2.0.2
+pyscreenshot>=3.1
+pyautogui>=0.9.54
+pygetwindow>=0.0.9
+psutil>=7.2.2
+pynput>=1.8.2
+pyaudio>=0.2.14
 audioop-lts>=0.2.1; python_version >= "3.13"   # audioop (used in audio_listener.py) was removed from the stdlib in 3.13; this restores it
 
 # dev / tests only
-pytest==8.4.2
+pytest>=8.4.2
