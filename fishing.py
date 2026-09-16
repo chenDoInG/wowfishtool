@@ -80,6 +80,21 @@ def check_process():
 	return running
 
 
+def _window_geometry(title):
+	"""(left, top, width, height) of the window with this exact title.
+
+	pygetwindow 0.0.9 (still the only version ever published, as of writing) is an
+	openly-unfinished library whose macOS and Windows backends expose completely
+	different, non-overlapping functions for this: macOS only has getWindowGeometry(),
+	Windows only has getWindowsWithTitle() (confirmed against both a real Windows
+	traceback and this module's own source per platform - there's no single function
+	name that works on both), so this has to branch instead of picking one."""
+	if sys.platform == 'win32':
+		window = gw.getWindowsWithTitle(title)[0]
+		return window.left, window.top, window.width, window.height
+	return gw.getWindowGeometry(title)
+
+
 def locate_game_window():
 	"""Refresh game_window_bbox from the WoW window's current position/size.
 
@@ -92,7 +107,7 @@ def locate_game_window():
 	titles = [t for t in gw.getAllTitles() if t and ('魔兽世界' in t or 'warcraft' in t.lower())]
 	if titles:
 		title = titles[0]
-		left, top, width, height = gw.getWindowGeometry(title)
+		left, top, width, height = _window_geometry(title)
 		game_window_bbox = (int(left), int(top), int(left + width), int(top + height))
 		if game_window_bbox != previous_bbox:
 			print('Found WoW window "' + title + '" at ' + str(game_window_bbox))
