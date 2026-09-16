@@ -27,6 +27,16 @@ python -m venv .venv
 .venv\Scripts\activate
 ```
 
+> ⚠️ **这两行要在 PowerShell/命令提示符里敲,不是在 Python 自己的交互解释器里敲。** 如果
+> `python` 命令没反应或提示不认识,常见原因是装 Python 时没勾选"Add python.exe to PATH",
+> 这种情况下可以换用 Windows 自带的启动器命令 `py`,把 `python -m venv .venv` 换成
+> `py -m venv .venv` 就行——但注意 `py` 后面必须跟上 `-m venv .venv` 一起敲在**同一行**。
+> 如果只敲了 `py`(不带任何参数)直接回车,会直接进入 Python 自己的交互解释器,提示符会
+> 从 `PS C:\...>` 变成 `>>>`——这时候再输入 `-m venv .venv` 只会得到
+> `SyntaxError: invalid syntax`,因为你是在把命令行参数当 Python 代码执行。看到 `>>>`
+> 提示符的话,先输入 `exit()` 回车退出解释器,回到 `PS C:\...>` 之后再重新执行完整的
+> `py -m venv .venv` 这一整行命令。
+
 ### 2. 系统权限(容易漏掉,漏了会表现成"脚本跑了但鼠标/键盘没反应")
 
 **macOS**:脚本靠 `pyautogui`/`pynput` 模拟鼠标键盘、靠截图识别画面,这两件事在 macOS 上都
@@ -128,7 +138,38 @@ required" 或者 "ERROR: No matching distribution found for pyaudio"),说明 pip
 pip install -r requirements.txt
 ```
 
+> ⚠️ **用 PyCharm 之类 IDE 的话,运行报 `ModuleNotFoundError: No module named 'xxx'`
+> 十有八九是"装的地方"和"跑的地方"不是同一个 Python 环境。** 常见情况:开了终端手动建了
+> `.venv` 并且 `pip install` 成功了,但 PyCharm 的运行配置(右上角/右下角显示的解释器)
+> 用的是另一个解释器(比如 PyCharm 自动创建的默认 venv,或者系统全局 Python),`pip
+> install` 装的包压根不在它能找到的地方。排查方法:PyCharm 右下角状态栏点一下当前解释器
+> 名字,确认它显示的路径(比如 `.venv\Scripts\python.exe`)跟你执行 `pip install -r
+> requirements.txt` 时终端里 `.venv` 是不是同一个;不确定的话直接在 PyCharm 底部的
+> "终端" 面板里(它默认会自动激活项目配置的解释器)重新跑一遍
+> `pip install -r requirements.txt` 最保险。
+
 ## 使用
+
+### 用 PyCharm 运行(Windows)
+
+1. `文件 → 打开`,选中这个项目文件夹(包含 `fishing.py` 的那一层)打开
+2. 确认解释器指向项目里的虚拟环境,不是系统全局 Python:`文件 → 设置 → 项目:
+   wow-fishing → Python 解释器`,右上角下拉框应该显示类似 `.venv` 的路径(形如
+   `...\wow-fishing\.venv\Scripts\python.exe`)。如果列表里没有,点"添加解释器"选
+   "Virtualenv 环境",指向项目根目录下的 `.venv` 文件夹(前提是已经按"环境准备"那步建好了)
+3. 装依赖:点开 PyCharm 底部的**终端**面板(不是"Python 控制台"/"Python 进程输出"那几个,
+   是标签写着"终端"的那个,它默认会自动激活项目的虚拟环境),在里面敲
+   `pip install -r requirements.txt`。如果 PyCharm 自己弹出"检测到 requirements.txt,
+   是否安装"的提示,点安装也可以,效果一样
+4. 在左侧项目树里找到 `fishing.py`,双击打开,点编辑器行号左边的绿色三角形(或者右键文件选
+   "运行 'fishing'"),PyCharm 会在底部"运行"面板里启动脚本——**这个面板只用来看输出,
+   不能在里面手动敲命令**,跟"终端"面板是两回事,不要混
+5. 看到运行面板打印出"Press F10 to start fishing, F11 to stop"之后,切回游戏窗口,按
+   F10/F11 操作——热键是系统级全局监听,不需要 PyCharm 窗口在前台
+
+macOS 用户 / 习惯直接用命令行的可以跳过上面这节,参考下面的通用步骤。
+
+### 命令行运行(通用 / macOS)
 
 1. 打开魔兽世界,**建议把画质调到 4 档左右,关掉水面反射/镜面效果**——画质越高,水面的
    环境反射越强,会把周围场景的颜色"染"到鱼漂本体上(尤其黄昏/夜晚这种有色调滤镜的场景),
