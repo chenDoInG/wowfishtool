@@ -101,8 +101,26 @@ macOS 上 `pyaudio` 依赖系统的 `portaudio` 库,先装好再 `pip install`:
 brew install portaudio
 ```
 
-Windows 上 `pyaudio` 一般直接 `pip install` 就能装上预编译好的 wheel,不需要额外装
-`portaudio`。
+**Windows** 上 `pyaudio` 从 0.2.12 版本起,官方就直接在 PyPI 提供编译好的 wheel(已经把
+PortAudio 打包进去了),覆盖 Python 3.8~3.13、32/64 位,正常情况下不需要单独装 PortAudio、
+也不需要装 Visual Studio 编译工具,`pip install -r requirements.txt` 跟着装完就行。
+
+如果装 `pyaudio` 这一步报错(常见报错是类似 "Microsoft Visual C++ 14.0 or greater is
+required" 或者 "ERROR: No matching distribution found for pyaudio"),说明 pip 没找到对应
+你 Python 版本的现成 wheel,想自己编译又缺编译环境,按顺序试:
+
+1. **先确认 pip 是最新的**,旧版本 pip 有时候认不出新发布的 wheel:
+
+   ```powershell
+   python -m pip install --upgrade pip
+   ```
+
+2. **再确认 Python 版本和位数有没有现成 wheel**:打开
+   [PyPI 上 PyAudio 的 Files 页面](https://pypi.org/project/PyAudio/#files),文件名里
+   `cp312` 对应 Python 3.12、`win_amd64` 是 64 位、`win32` 是 32 位——对照你的 Python
+   版本(`python --version`)看有没有匹配的 `.whl`。如果你的 Python 版本太新、还没发布
+   对应 wheel,最省事的办法是换一个稍旧一点、肯定有 wheel 的 Python 版本(比如 3.11 或
+   3.12)重新建虚拟环境
 
 两边都一样:
 
