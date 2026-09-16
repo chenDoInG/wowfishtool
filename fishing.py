@@ -88,11 +88,19 @@ def _window_geometry(title):
 	different, non-overlapping functions for this: macOS only has getWindowGeometry(),
 	Windows only has getWindowsWithTitle() (confirmed against both a real Windows
 	traceback and this module's own source per platform - there's no single function
-	name that works on both), so this has to branch instead of picking one."""
-	if sys.platform == 'win32':
+	name that works on both), so this has to branch instead of picking one.
+
+	sys.platform is 'win32' on Windows regardless of 32/64-bit - there's no separate
+	'win64' value, that's not a gap here. Checked explicitly (rather than treating
+	anything-not-Windows as macOS) since pygetwindow itself only supports these two
+	platforms anyway - failing clearly here beats silently trying the wrong branch's
+	function and getting a confusing AttributeError instead."""
+	if sys.platform == 'darwin':
+		return gw.getWindowGeometry(title)
+	elif sys.platform == 'win32':
 		window = gw.getWindowsWithTitle(title)[0]
 		return window.left, window.top, window.width, window.height
-	return gw.getWindowGeometry(title)
+	raise NotImplementedError('_window_geometry() has no implementation for sys.platform=' + sys.platform)
 
 
 def locate_game_window():
