@@ -16,7 +16,14 @@ from float_detector import find_float
 
 dev = False
 
-WOW_PROCESS_NAMES = ["Wow.exe", "World of Warcraft", "World of Warcraft Classic"]
+# What psutil's Process.name() returns differs by OS: on Windows it's the executable's
+# short filename (e.g. "WowClassic.exe" - confirmed against a real Windows report that
+# "Wow.exe"/"World of Warcraft"/"World of Warcraft Classic" weren't matching), on macOS
+# it's the actual binary's full name, spaces and all (confirmed live here: psutil reports
+# it as 'World of Warcraft Classic' - retail would presumably be 'World of Warcraft').
+# "world of warcraft" alone covers both macOS cases since Classic's name contains it as a
+# substring. Matching is case-insensitive (see is_wow_running()).
+WOW_PROCESS_NAMES = ["wow.exe", "wowclassic.exe", "wow-64.exe", "wowclassic-64.exe", "world of warcraft"]
 
 SCREENSHOT_PATH = 'var/fishing_session.png'
 
@@ -57,7 +64,7 @@ def is_wow_running():
 			name = psutil.Process(pid).name()
 		except (psutil.NoSuchProcess, psutil.AccessDenied):
 			continue
-		if any(w in name for w in WOW_PROCESS_NAMES):
+		if any(w in name.lower() for w in WOW_PROCESS_NAMES):
 			print(name)
 			return True
 	return False
