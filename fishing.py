@@ -164,7 +164,15 @@ def try_recover_from_disconnect():
 	wasn't enough for character-select to actually finish loading/settle before the 3rd
 	Enter fired, so it never actually entered the world - widened twice now (2s -> 5s ->
 	10s); still unverified whether it's enough yet. Same for the final wait (entering the
-	world triggers its own loading screen) - widened once (8s -> 18s), also unverified."""
+	world triggers its own loading screen) - widened once (8s -> 18s), also unverified.
+
+	CONFIRMED HARMFUL without the trailing Escape below: MAX_CONSECUTIVE_MISSES can also
+	fire for a plain detection miss (no disconnect at all, character still in-world and
+	fishing normally) - Enter with no dialog open just opens the chat box, and every key
+	fish_once() presses after that (bait, cast) gets typed into it as chat text instead of
+	doing anything, silently breaking casting for the rest of the session. Escape closes
+	that chat box (or any leftover menu) regardless of whether this really was a
+	disconnect, so it's added as a blind, harmless cleanup step either way."""
 	print('Trying Enter x3 in case this is a disconnect, not a detection problem')
 	pyautogui.press('enter')
 	stop_requested.wait(2)
@@ -178,6 +186,9 @@ def try_recover_from_disconnect():
 	# world, which triggers a loading screen - give that more room than the 2s gap
 	# above before anything else tries to act on the (still loading) game window.
 	stop_requested.wait(18)
+	# Undo the case where none of this was actually needed and an Enter just opened the
+	# chat box instead - see the CONFIRMED HARMFUL note above.
+	pyautogui.press('escape')
 
 
 def fish_once():
