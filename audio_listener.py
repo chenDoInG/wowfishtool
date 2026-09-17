@@ -1,10 +1,17 @@
 import pyaudio
 import audioop
 import math
+import sys
 import time
 from collections import deque
 
-LOOPBACK_NAME_HINT = 'blackhole'
+# BlackHole (macOS) and VB-Cable (Windows) are named nothing alike, and PyAudio's default
+# input device (used whenever this hint matches nothing) is the physical microphone on
+# both platforms - silently falling back to it means the bot listens to the room instead
+# of the game's routed audio, with no error to signal that anything's wrong. Confirmed
+# live against a real Windows device list: 'blackhole' matched zero of the VB-Cable/
+# VB-Audio Point entries there, so this must be picked per-OS rather than left fixed.
+LOOPBACK_NAME_HINT = 'blackhole' if sys.platform == 'darwin' else 'cable'
 
 
 def find_loopback_device_index(p, name_hint=LOOPBACK_NAME_HINT):

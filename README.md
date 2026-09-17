@@ -29,19 +29,22 @@ source .venv/bin/activate
 **Windows**
 
 ```powershell
+# 在 PowerShell / 命令提示符里敲,不是在 Python 自己的交互解释器里敲
 python -m venv .venv
 .venv\Scripts\activate
 ```
 
-> ⚠️ **这两行要在 PowerShell/命令提示符里敲,不是在 Python 自己的交互解释器里敲。** 如果
-> `python` 命令没反应或提示不认识,常见原因是装 Python 时没勾选"Add python.exe to PATH",
-> 这种情况下可以换用 Windows 自带的启动器命令 `py`,把 `python -m venv .venv` 换成
-> `py -m venv .venv` 就行——但注意 `py` 后面必须跟上 `-m venv .venv` 一起敲在**同一行**。
-> 如果只敲了 `py`(不带任何参数)直接回车,会直接进入 Python 自己的交互解释器,提示符会
-> 从 `PS C:\...>` 变成 `>>>`——这时候再输入 `-m venv .venv` 只会得到
-> `SyntaxError: invalid syntax`,因为你是在把命令行参数当 Python 代码执行。看到 `>>>`
-> 提示符的话,先输入 `exit()` 回车退出解释器,回到 `PS C:\...>` 之后再重新执行完整的
-> `py -m venv .venv` 这一整行命令。
+> ⚠️ 如果 `python` 命令没反应/提示不认识,常见原因是装 Python 时没勾选"Add python.exe
+> to PATH",换用 Windows 自带的启动器命令 `py` 就行,但要注意 `-m venv .venv` 必须跟
+> `py` 写在**同一行**一起敲,不能分两次敲:
+
+```powershell
+C:\Users\you> py                  # ✗ 只敲 py 不带参数,回车后会直接进入 Python 解释器
+>>> -m venv .venv                 # ✗ 这里已经是 Python 解释器了,不是命令行,会报
+                                   #   SyntaxError: invalid syntax
+>>> exit()                        # 看到 >>> 提示符的话,先这样退出解释器
+C:\Users\you> py -m venv .venv    # ✓ 回到命令行提示符后,重新完整敲这一整行
+```
 
 ### 2. 系统权限(容易漏掉,漏了会表现成"脚本跑了但鼠标/键盘没反应")
 
@@ -67,6 +70,19 @@ WoW 都右键"以管理员身份运行"),要么两边都不用管理员权限,�
 脚本靠监听系统音频里的上钩声音来判断什么时候拉杆,所以需要一个能把游戏声音路由进来的
 虚拟回环录音设备,而不是对着麦克风收环境噪音。
 
+**先调一下游戏内的声音设置(通用,跟系统无关)**,不然回环设备装得再对也可能听不清:
+
+1. **音效音量必须开着**——游戏选项 → 声音里的"音效"(Sound Effects)滑块,上钩的"啵"一声
+   走的就是这个,关掉或调到0脚本就永远听不到
+2. **音乐、环境声音建议关掉/调低**——背景音乐、风声水声这类持续性的声音会垫高录到的背景
+   噪音基准线,让上钩那一下没那么好分辨,`listen()` 的 `threshold` 更难调准
+3. ⚠️ **重点:关掉"后台/非焦点窗口时降低音量"这类选项**(不同版本客户端叫法可能不太一样,
+   自己在声音设置里找一下)——这个功能是设计给你切出去挂着的,一旦触发,游戏会把自己的
+   音量压得很低甚至静音,回环设备里录到的上钩声音也会跟着变小到过不了 threshold,导致
+   脚本一直"没听到咬钩"却看起来什么都正常。同理,如果开着 Discord 之类软件,也留意一下
+   它是否有"检测到别人说话就压低其他程序音量"的选项(通常叫"衰减"/"attenuation"),
+   开着的话一样会把游戏声音压下去
+
 **macOS:安装 [BlackHole](https://github.com/ExistentialAudio/BlackHole)**
 
 ```bash
@@ -85,10 +101,16 @@ brew install blackhole-2ch
    如果你的设备名不带这几个字(比如用了别的中文/自定义命名),把 `LOOPBACK_NAME_HINT` 改成
    实际能匹配到的关键字
 
-**Windows:BlackHole 不支持 Windows** ⚠️,需要装一个功能类似的虚拟声卡,推荐二选一:
+**Windows:BlackHole 不支持 Windows** ⚠️,需要装一个功能类似的虚拟声卡:
 
-- [VB-Audio Virtual Cable](https://vb-audio.com/Cable/)(免费,最简单,推荐先试这个)
-- [VoiceMeeter](https://vb-audio.com/Voicemeeter/)(功能更全,配置也更复杂,免费)
+- [VB-Audio Virtual Cable](https://vb-audio.com/Cable/)(免费,最简单,唯一实测过的方案)
+
+⚠️ 只装这一个,不要额外再装别的虚拟声卡(比如 VoiceMeeter、"VB-Audio Point" 之类
+VB-Audio 家其他产品——没测过,不保证能用)。装多个虚拟声卡之后,Windows 里会同时出现
+好几个名字都带 "CABLE" 的录音设备,而下面第5步的自动匹配是按设备编号从小到大挑第一个
+名字匹配的,装了不止一个的话很可能挑到的不是你系统输出实际接的那一个,到时候人听得到
+游戏声音、脚本却收不到,还不容易看出是这个原因。已经装了不止一个的话,把用不上的从
+"设置 → 应用"里卸载掉,只留 VB-Cable 这一个。
 
 以 VB-Cable 为例大致步骤:
 
@@ -100,11 +122,9 @@ brew install blackhole-2ch
    "通过此设备播放"并指向你实际的耳机/音箱
 4. 魔兽世界游戏内的声音输出设备也确认一下,同样指向 "CABLE Input"(或者干脆用系统默认,只要
    系统默认就是 CABLE Input)
-5. 把 `audio_listener.py` 里的 `LOOPBACK_NAME_HINT` 改成设备名关键字:
-
-   ```python
-   LOOPBACK_NAME_HINT = 'cable'
-   ```
+5. `audio_listener.py` 会自动按系统类型选关键字,Windows 下默认就是找名字带 "cable" 的录音
+   设备,一般不用改代码;只有你的设备名不带这几个字(比如自己改过设备命名),才需要把
+   `LOOPBACK_NAME_HINT` 改成实际能匹配到的关键字
 
 配置完用 `tests/test_listen.py` 实测一下(见下方"运行测试"),确认游戏声音能被正常录到、
 峰值/均值大概是多少,再照实际数值调 `fishing.py` 里 `listen()` 的 `threshold`。
@@ -271,8 +291,11 @@ pytest
 `tests/test_find_float.py`、`tests/test_audio_listener.py` 是自动化回归测试,不需要开游戏或
 真实麦克风,改动识别/音频逻辑之后应该先跑一遍确认没有回归。
 
-`tests/test_click.py`、`tests/test_listen.py` 是需要人工确认结果的手动诊断脚本,直接运行
-查看输出即可:
+`tests/test_click.py`、`tests/test_listen.py` 是需要人工确认结果的手动诊断脚本,**当成普通
+Python 脚本运行**(`python tests/test_click.py`),不是自动化测试,里面没有 `test_` 开头的
+用例函数。用 PyCharm 右键运行的话,注意选"运行 'test_click'"这个选项,不要选成"运行 pytest
+in test_click.py"——PyCharm 有时候看到 `tests/` 目录会默认建议用 pytest 方式运行,选错了会
+显示"collected 0 items",什么都不会执行,不是脚本本身有问题。直接运行查看输出即可:
 
 - `test_click.py`:验证模拟右键点击能不能实际传到别的窗口/程序,主要用来排查 macOS 辅助功能
   权限有没有生效——如果这个脚本点了没反应,先去查权限设置,不用怀疑 `fishing.py` 的逻辑
