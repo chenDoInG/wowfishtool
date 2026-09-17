@@ -110,7 +110,7 @@ FALLBACK_VERTICAL_BIAS = 0.65
 # screenshot into DEBUG_SNAPSHOT_DIR any time the click point falls back to the matched
 # box's geometric center (see the comment where this is used in find_float()), for
 # reviewing after the fact instead of only when a bad catch happens to get noticed.
-DEBUG_SNAPSHOTS = False
+DEBUG_SNAPSHOTS = True
 DEBUG_SNAPSHOT_DIR = 'debug'   # kept out of var/, which holds the bot's real runtime data
 
 
@@ -137,13 +137,24 @@ def _drop_large_blobs(mask: np.ndarray, max_size: int):
 
 def _adaptive_color_mask(hsv_region: np.ndarray):
 	"""Pixels distinctly more saturated than this scene's own water, regardless of what
-	hue that happens to be - see the comment on FLOAT_SATURATION_MARGIN above."""
+	hue that happens to be - see the comment on FLOAT_SATURATION_MARGIN above.
+
+	Returns (mask, gate_reliable). In a scene saturated enough that its own 99.5th-
+	percentile pixel already sits at the HSV ceiling (255), water_baseline +
+	FLOAT_SATURATION_MARGIN exceeds the max representable saturation - no pixel,
+	however float-colored, could ever pass the gate, regardless of the float's own
+	color. gate_reliable is False only in that specific degenerate case (confirmed on a
+	real miss: 17% of the search area sat at S==255, threshold came out above 255, and
+	the float's own template match still scored a confident 0.659) - not whenever the
+	mask merely happens to be empty, which also happens on ordinary colorless frames
+	(disconnect/login/character-select screens) where the gate is working correctly and
+	rejecting a real non-float scene."""
 	saturation = hsv_region[:, :, 1]
 	value = hsv_region[:, :, 2]
 	water_baseline = np.percentile(saturation, FLOAT_SATURATION_BASELINE_PERCENTILE)
 	threshold = water_baseline + FLOAT_SATURATION_MARGIN
 	mask = ((saturation > threshold) & (value > FLOAT_MIN_VALUE)).astype(np.uint8) * 255
-	return _drop_large_blobs(mask, FLOAT_MAX_BLOB_SIZE)
+	return _drop_large_blobs(mask, FLOAT_MAX_BLOB_SIZE), threshold <= 255
 
 
 def _float_click_point(bgr_region: np.ndarray):
@@ -203,7 +214,7 @@ def find_float(screenshot_path):
 	search_area_gray: np.ndarray = img_gray[search_y0:search_y1, search_x0:search_x1]
 	search_area_bgr: np.ndarray = img_bgr[search_y0:search_y1, search_x0:search_x1]
 	search_area_hsv: np.ndarray = cv2.cvtColor(search_area_bgr, cv2.COLOR_BGR2HSV)
-	color_mask = _adaptive_color_mask(search_area_hsv)
+	color_mask, color_gate_active = _adaptive_color_mask(search_area_hsv)
 
 	best_val = 0
 	best_loc = None
@@ -220,9 +231,10 @@ def find_float(screenshot_path):
 		# correlation, but the water is never as saturated/colorful as the float's bobber
 		# base - rule out any position that doesn't have enough of that color nearby
 		# before picking the best-scoring one.
-		rh, rw = result.shape
-		color_density = _box_density(color_mask, (tw, th))[:rh, :rw]
-		result[color_density < FLOAT_MIN_COLOR_PIXELS] = -1
+		if color_gate_active:
+			rh, rw = result.shape
+			color_density = _box_density(color_mask, (tw, th))[:rh, :rw]
+			result[color_density < FLOAT_MIN_COLOR_PIXELS] = -1
 
 		_, max_val, _, max_loc = cv2.minMaxLoc(result)
 		if max_val > best_val:

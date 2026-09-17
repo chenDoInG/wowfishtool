@@ -7,6 +7,9 @@ can't silently break detection without a test failing.
 """
 import os
 
+import cv2
+import numpy as np
+
 from float_detector import find_float
 
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'sample_screenshot.png')
@@ -82,6 +85,16 @@ EXTREME_DUSK_TOLERANCE_PX = 20   # same fallback caveat as the dusk case above -
 # adding fishing_float_6.png, cropped from this exact scene.
 SUNSET_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'sunset_purple_water.png')
 SUNSET_EXPECTED_X, SUNSET_EXPECTED_Y = 1077, 434
+
+# Water saturated enough that 17% of the search band's pixels sat at the HSV ceiling
+# (255) meant the 99.5th-percentile baseline itself came out to 255 - adding
+# FLOAT_SATURATION_MARGIN on top pushed the required threshold past the maximum
+# representable saturation, so zero pixels anywhere could ever pass the color gate
+# regardless of the float's own color. The float's template match still scored a
+# confident 0.659 on grayscale alone. Fixed by skipping the color gate entirely when it
+# would zero out the whole search area, trusting the template score alone instead.
+CLIPPED_SATURATION_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'saturation_ceiling_clip.png')
+CLIPPED_SATURATION_EXPECTED_X, CLIPPED_SATURATION_EXPECTED_Y = 914, 615
 
 
 def test_find_float_locates_the_known_float():
@@ -167,3 +180,27 @@ def test_find_float_detects_float_in_sunset_tinted_water():
 	x, y = place
 	assert abs(x - SUNSET_EXPECTED_X) <= TOLERANCE_PX
 	assert abs(y - SUNSET_EXPECTED_Y) <= TOLERANCE_PX
+
+
+def test_find_float_detects_float_when_water_saturation_clips_the_color_gate():
+	place = find_float(CLIPPED_SATURATION_FIXTURE_PATH)
+
+	assert place is not None
+	x, y = place
+	assert abs(x - CLIPPED_SATURATION_EXPECTED_X) <= TOLERANCE_PX
+	assert abs(y - CLIPPED_SATURATION_EXPECTED_Y) <= TOLERANCE_PX
+
+
+def test_find_float_rejects_colorless_frame(tmp_path):
+	# A flat grey frame - standing in for WoW's disconnect/login/character-select
+	# screens, which have no saturated pixels at all. The color gate must stay active
+	# here (low water_baseline, nowhere near the 255 ceiling) and correctly reject
+	# whatever the grayscale-only template correlation happens to score on plain grey -
+	# guards against the saturation-ceiling fix above (color_gate_active in find_float())
+	# ever being broadened into skipping the gate on any empty mask, not just the
+	# specific "threshold exceeds 255" case it's meant for.
+	blank_frame = np.full((1050, 1893, 3), 120, dtype=np.uint8)
+	frame_path = tmp_path / 'colorless_frame.png'
+	cv2.imwrite(str(frame_path), blank_frame)
+
+	assert find_float(str(frame_path)) is None
