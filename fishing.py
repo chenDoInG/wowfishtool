@@ -196,13 +196,19 @@ def try_recover_from_disconnect():
 	10s); still unverified whether it's enough yet. Same for the final wait (entering the
 	world triggers its own loading screen) - widened once (8s -> 18s), also unverified.
 
-	CONFIRMED HARMFUL without the trailing Escape below: MAX_CONSECUTIVE_MISSES can also
-	fire for a plain detection miss (no disconnect at all, character still in-world and
-	fishing normally) - Enter with no dialog open just opens the chat box, and every key
-	fish_once() presses after that (bait, cast) gets typed into it as chat text instead of
-	doing anything, silently breaking casting for the rest of the session. Escape closes
-	that chat box (or any leftover menu) regardless of whether this really was a
-	disconnect, so it's added as a blind, harmless cleanup step either way."""
+	A plain detection miss (no disconnect at all, character still in-world and fishing
+	normally) can also fire MAX_CONSECUTIVE_MISSES - Enter with no dialog open just opens
+	the chat box, and every key fish_once() presses after that (bait, cast) gets typed into
+	it as chat text instead of doing anything. A trailing Escape was tried here as a blind
+	cleanup step for that case, but recovery_*.png snapshots caught it doing the opposite
+	in the *successful*-recovery case: with nothing left open (character already back
+	in-world), Escape doesn't no-op - it opens the main game menu (WoW's Escape is a
+	toggle: closes whatever's focused, or opens the game menu if nothing is). That menu
+	then sits there blocking every subsequent cast/click until someone closes it by hand,
+	which is worse than the chat-box case it was meant to fix - that one still self-resolves
+	via the same give-up-after-10-more-misses path this whole recovery does when it fails,
+	so dropping the trailing Escape doesn't actually make the miss-not-disconnect case any
+	worse, while it stops the success case from getting sabotaged. Removed."""
 	print('Trying Enter x3 in case this is a disconnect, not a detection problem')
 	pyautogui.press('enter')
 	stop_requested.wait(2)
@@ -216,9 +222,14 @@ def try_recover_from_disconnect():
 	# world, which triggers a loading screen - give that more room than the 2s gap
 	# above before anything else tries to act on the (still loading) game window.
 	stop_requested.wait(18)
-	# Undo the case where none of this was actually needed and an Enter just opened the
-	# chat box instead - see the CONFIRMED HARMFUL note above.
-	pyautogui.press('escape')
+	if float_detector.DEBUG_SNAPSHOTS:
+		# Whether the wait above was actually long enough is otherwise only checkable by
+		# happening to be watching the screen live when it matters - save what the game
+		# window looks like right after recovery so it can be checked after the fact.
+		os.makedirs(float_detector.DEBUG_SNAPSHOT_DIR, exist_ok=True)
+		recovery_path = os.path.join(float_detector.DEBUG_SNAPSHOT_DIR, 'recovery_' + str(int(time.time())) + '.png')
+		ImageGrab.grab(game_window_bbox).save(recovery_path)
+		print('Saved ' + recovery_path + ' to check whether recovery actually got back in-world')
 
 
 def fish_once():
