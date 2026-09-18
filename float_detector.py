@@ -167,7 +167,7 @@ FALLBACK_VERTICAL_BIAS = 0.65
 # screenshot into DEBUG_SNAPSHOT_DIR any time the click point falls back to the matched
 # box's geometric center (see the comment where this is used in find_float()), for
 # reviewing after the fact instead of only when a bad catch happens to get noticed.
-DEBUG_SNAPSHOTS = True
+DEBUG_SNAPSHOTS = False
 DEBUG_SNAPSHOT_DIR = 'debug'   # kept out of var/, which holds the bot's real runtime data
 
 
