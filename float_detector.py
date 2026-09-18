@@ -124,6 +124,22 @@ FLOAT_BASE_COLOR_RANGES = (
 )
 FLOAT_MIN_BASE_COLOR_PIXELS = 15
 
+# A warm-enough dusk sea can put the *water itself* inside the daylight base range above
+# over a wide, contiguous area - not just the float. _drop_large_blobs correctly strips
+# that giant float+water blob out (its bounding box clears FLOAT_MAX_BLOB_SIZE), but what
+# survives is then just scattered, disconnected leftover flecks that happen to also fall
+# in range elsewhere in the padded region - real noise, unrelated to the float - which can
+# still sum past FLOAT_MIN_BASE_COLOR_PIXELS across enough of them and produce a confident-
+# looking but wrong centroid, real duller (2026-09-18 live miss: base+water fused into one
+# 224x157 blob, correctly dropped; the leftover noise still summed to 68px across several
+# fragments, none bigger than 23px, and centroided ~85px from the float's real position).
+# Every confirmed-real detection logged so far has its single largest surviving connected
+# component at 39px or more (down to a mask that's just one 39px blob with nothing else);
+# the confirmed-noise case above topped out at 23px. Requiring the largest component alone
+# (not the sum across all of them) to clear a floor between those two sits away from both
+# without touching the sum-based centroid math real detections already rely on.
+FLOAT_MIN_BASE_BLOB_AREA = 30
+
 # How far beyond the matched template's own box to look for the base's color - see the
 # comment where this is used in find_float(). Only padding downward/sideways, never
 # upward: the base always sits at or below the matched box in every fixture that's
@@ -213,6 +229,15 @@ def _float_click_point(bgr_region: np.ndarray):
 	moments = cv2.moments(mask, binaryImage=True)
 	if moments['m00'] < FLOAT_MIN_BASE_COLOR_PIXELS:
 		return None
+	# A scene where the water shares the base's color range can leave behind scattered
+	# noise fragments that individually mean nothing but sum past the floor above - see
+	# FLOAT_MIN_BASE_BLOB_AREA. A real base is one solid blob, so require whichever single
+	# component is biggest to look like one, not just the total across however many there
+	# are; the sum-based centroid below is unchanged for every scene where that holds.
+	_, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+	largest_component = max((stats[i, cv2.CC_STAT_AREA] for i in range(1, stats.shape[0])), default=0)
+	if largest_component < FLOAT_MIN_BASE_BLOB_AREA:
+		return None
 	return moments['m10'] / moments['m00'], moments['m01'] / moments['m00']
 
 
@@ -287,12 +312,22 @@ def find_float(screenshot_path):
 	best_loc = None
 	best_size = None
 	best_template = None
+	# Tracked alongside the gated result (see below) rather than only computed on demand,
+	# so picking it never costs a second pass over the templates.
+	raw_best_val = 0
+	raw_best_loc = None
+	raw_best_size = None
+	raw_best_template = None
 	for template_path in sorted(glob.glob(FLOAT_TEMPLATE_GLOB)):
 		template = cv2.imread(template_path, 0)
 		if template is None:
 			continue
 		th, tw = template.shape[:2]
 		result = cv2.matchTemplate(search_area_gray, template, cv2.TM_CCOEFF_NORMED)
+
+		_, raw_max_val, _, raw_max_loc = cv2.minMaxLoc(result)
+		if raw_max_val > raw_best_val:
+			raw_best_val, raw_best_loc, raw_best_size, raw_best_template = raw_max_val, raw_max_loc, (tw, th), template_path
 
 		# Water/shoreline edges can score just as well as the real float on pure grayscale
 		# correlation, but the water is never as saturated/colorful as the float's bobber
@@ -306,6 +341,20 @@ def find_float(screenshot_path):
 		_, max_val, _, max_loc = cv2.minMaxLoc(result)
 		if max_val > best_val:
 			best_val, best_loc, best_size, best_template = max_val, max_loc, (tw, th), template_path
+
+	# A scene can be saturated enough overall that *some* pixel far from the float clears
+	# the adaptive threshold (so the "gate found nothing anywhere" escape hatch above never
+	# fires) while the float's own, comparatively duller base in this same lighting never
+	# does - the gate still zeroes out the float's true position, same practical effect as
+	# a fully broken gate, just not visible as a globally empty mask. Confirmed on a real
+	# capture (see the warm_dusk_gate_miss fixture): the float's own position scored 0.53-
+	# 0.7 ungated - solidly within the confirmed-real range noted on FLOAT_MATCH_THRESHOLD
+	# above - yet every gated candidate topped out at 0.24-0.34 because whatever scattered
+	# pixels elsewhere kept the gate "active" didn't line up with anything float-shaped.
+	# Same remedy as the fully-empty-mask case: stop trusting a gate that isn't separating
+	# float from water here either, and fall back to the grayscale shape match alone.
+	if color_gate_active and best_val <= FLOAT_MATCH_THRESHOLD and raw_best_val > FLOAT_MATCH_THRESHOLD:
+		best_val, best_loc, best_size, best_template = raw_best_val, raw_best_loc, raw_best_size, raw_best_template
 
 	if best_val <= FLOAT_MATCH_THRESHOLD or best_loc is None or best_template is None or best_size is None:
 		return None

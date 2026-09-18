@@ -142,6 +142,38 @@ UNIFORM_DESAT_TOLERANCE_PX = 20
 DIM_NIGHT_BASE_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'dim_night_base_color.png')
 DIM_NIGHT_BASE_EXPECTED_X, DIM_NIGHT_BASE_EXPECTED_Y = 1355.61, 695.46
 
+# A heavily orange-tinted dusk sea (logged live as a "not found" miss, not a bad-click
+# fallback) where the water's own 99.5th-percentile saturation already sat at 190, so the
+# adaptive threshold (210) was higher than the float's own base ever reached in this
+# lighting (measured 70-140) - the gate rejected the float's true position outright. The
+# "gate found nothing anywhere" escape hatch didn't fire here, unlike UNIFORM_DESAT/
+# CLIPPED_SATURATION above: unrelated scattered pixels elsewhere in the search band (not
+# shaped anything like the float) happened to clear that same threshold, keeping the mask
+# non-empty and the gate looking "active" even though it still couldn't discriminate the
+# float from water. Confirmed real: grayscale alone scored 0.53-0.7 at the float's actual
+# position (comfortably within the confirmed-real range noted on FLOAT_MATCH_THRESHOLD),
+# while every gated candidate topped out at 0.24-0.34. Fixed by also falling back to the
+# grayscale-only match when the gate accepts nothing above FLOAT_MATCH_THRESHOLD anywhere,
+# not just when its mask is completely empty.
+WARM_DUSK_GATE_MISS_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'warm_dusk_gate_miss.png')
+WARM_DUSK_GATE_MISS_EXPECTED_X, WARM_DUSK_GATE_MISS_EXPECTED_Y = 1438, 800
+
+# A different warm-dusk capture (same session, box-location matching worked fine here -
+# grayscale scored 0.594 right on the float) where the water's own color fell inside the
+# base's daylight FLOAT_BASE_COLOR_RANGES over a wide contiguous area, fusing the float's
+# own base into one 224x157 blob with the surrounding water. _drop_large_blobs correctly
+# dropped that fused blob (it clears FLOAT_MAX_BLOB_SIZE), but the scattered few-pixel
+# fragments left over elsewhere in the padded region still summed past
+# FLOAT_MIN_BASE_COLOR_PIXELS, centroiding to a point ~85px from the float - confidently
+# wrong rather than correctly falling back. Fixed by also requiring the single largest
+# surviving component to look like a real blob - see FLOAT_MIN_BASE_BLOB_AREA.
+CLICK_NOISE_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'warm_water_gate_click_noise.png')
+CLICK_NOISE_EXPECTED_X, CLICK_NOISE_EXPECTED_Y = 1388, 765
+CLICK_NOISE_TOLERANCE_PX = 40   # the fix only restores the existing geometric-center
+# fallback (falling back is still correct here - the base's true color is indistinguishable
+# from the water over a wide area, so there's no real color match to be had), which is
+# intentionally looser than a real color-matched click - see FALLBACK_VERTICAL_BIAS
+
 
 def test_find_float_locates_the_known_float():
 	place = find_float(FIXTURE_PATH)
@@ -274,6 +306,24 @@ def test_find_float_detects_base_color_of_a_dark_night_float():
 	x, y = place
 	assert abs(x - DIM_NIGHT_BASE_EXPECTED_X) <= TOLERANCE_PX
 	assert abs(y - DIM_NIGHT_BASE_EXPECTED_Y) <= TOLERANCE_PX
+
+
+def test_find_float_detects_float_when_gate_rejects_it_but_other_pixels_keep_it_active():
+	place = find_float(WARM_DUSK_GATE_MISS_FIXTURE_PATH)
+
+	assert place is not None
+	x, y = place
+	assert abs(x - WARM_DUSK_GATE_MISS_EXPECTED_X) <= TOLERANCE_PX
+	assert abs(y - WARM_DUSK_GATE_MISS_EXPECTED_Y) <= TOLERANCE_PX
+
+
+def test_find_float_ignores_scattered_noise_when_water_matches_base_color():
+	place = find_float(CLICK_NOISE_FIXTURE_PATH)
+
+	assert place is not None
+	x, y = place
+	assert abs(x - CLICK_NOISE_EXPECTED_X) <= CLICK_NOISE_TOLERANCE_PX
+	assert abs(y - CLICK_NOISE_EXPECTED_Y) <= CLICK_NOISE_TOLERANCE_PX
 
 
 def test_find_float_rejects_colorless_frame(tmp_path):
