@@ -10,7 +10,7 @@ import os
 import cv2
 import numpy as np
 
-from float_detector import find_float
+from float_detector import FLOAT_MAX_BLOB_SIZE, _adaptive_color_mask, _drop_large_blobs, find_float
 
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'sample_screenshot.png')
 EXPECTED_X, EXPECTED_Y = 1362.75, 660.5
@@ -324,6 +324,51 @@ def test_find_float_ignores_scattered_noise_when_water_matches_base_color():
 	x, y = place
 	assert abs(x - CLICK_NOISE_EXPECTED_X) <= CLICK_NOISE_TOLERANCE_PX
 	assert abs(y - CLICK_NOISE_EXPECTED_Y) <= CLICK_NOISE_TOLERANCE_PX
+
+
+def test_adaptive_color_mask_does_not_drop_large_blobs_itself():
+	"""_adaptive_color_mask() must hand back the raw saturation mask, not one that's
+	already had oversized blobs dropped - find_float() needs to blank UI_EXCLUDE_REGIONS
+	first and only drop oversized blobs after (see the next test for why), which only
+	works if this function doesn't do that dropping internally beforehand."""
+	# Canvas sized so the blob below stays under the 99.5th-percentile baseline's own
+	# 0.5% slice of the image - otherwise the blob would skew the adaptive threshold
+	# itself high enough to swallow its own pixels, which is a real effect (see
+	# FLOAT_SATURATION_BASELINE_PERCENTILE) but not what this test is checking.
+	hsv = np.zeros((800, 1400, 3), dtype=np.uint8)
+	hsv[:, :, 1] = 30
+	hsv[:, :, 2] = 150
+	hsv[100:120, 50:300, 1] = 200   # 250px wide - well over FLOAT_MAX_BLOB_SIZE
+
+	mask, _ = _adaptive_color_mask(hsv)
+
+	assert int((mask[100:120, 50:300] > 0).sum()) == 250 * 20
+
+
+def test_find_float_keeps_a_float_touching_a_ui_frame_blob():
+	"""A float that merely touches a UI-frame-sized saturated blob (rather than landing
+	inside UI_EXCLUDE_REGIONS itself) must not have its own, individually-small color
+	evidence wiped out because _drop_large_blobs saw one merged oversized blob before UI
+	exclusion got a chance to separate them. Reproduced live: a 40x10 float-sized patch
+	lost all its color support once an adjacent 170x10 UI-sized patch pushed their
+	combined bounding box over FLOAT_MAX_BLOB_SIZE, even though each alone was
+	comfortably under it - fixed by blanking the UI area before dropping large blobs,
+	not after (see the comment in find_float())."""
+	w, h = 1280, 593
+	hsv = np.zeros((h, w, 3), dtype=np.uint8)
+	hsv[:, :, 1] = 30
+	hsv[:, :, 2] = 150
+	hsv[200:210, 100:140, 1] = 200   # float-sized patch: 40x10
+	hsv[200:210, 140:310, 1] = 200   # UI-sized patch touching it: 170x10
+
+	mask, gate_reliable = _adaptive_color_mask(hsv)
+	assert gate_reliable
+	# Simulate find_float()'s actual composition order: blank the UI area first, only
+	# then drop oversized blobs.
+	mask[195:215, 140:310] = 0
+	mask = _drop_large_blobs(mask, FLOAT_MAX_BLOB_SIZE)
+
+	assert int((mask[200:210, 100:140] > 0).sum()) == 40 * 10
 
 
 def test_find_float_rejects_colorless_frame(tmp_path):

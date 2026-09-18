@@ -205,13 +205,16 @@ def _adaptive_color_mask(hsv_region: np.ndarray):
 	the float's own template match still scored a confident 0.659) - not whenever the
 	mask merely happens to be empty, which also happens on ordinary colorless frames
 	(disconnect/login/character-select screens) where the gate is working correctly and
-	rejecting a real non-float scene."""
+	rejecting a real non-float scene.
+
+	Deliberately does NOT drop oversized blobs itself - see the comment in find_float()
+	where UI_EXCLUDE_REGIONS is blanked out before that happens."""
 	saturation = hsv_region[:, :, 1]
 	value = hsv_region[:, :, 2]
 	water_baseline = np.percentile(saturation, FLOAT_SATURATION_BASELINE_PERCENTILE)
 	threshold = water_baseline + FLOAT_SATURATION_MARGIN
 	mask = ((saturation > threshold) & (value > FLOAT_MIN_VALUE)).astype(np.uint8) * 255
-	return _drop_large_blobs(mask, FLOAT_MAX_BLOB_SIZE), threshold <= 255
+	return mask, threshold <= 255
 
 
 def _float_click_point(bgr_region: np.ndarray):
@@ -285,7 +288,12 @@ def find_float(screenshot_path):
 	# Blank out each known UI player-frame's fixed spot (see UI_EXCLUDE_REGIONS above)
 	# within the search area's own local coordinates, clipped to whatever part of it
 	# actually falls inside the search band, so no candidate window anchored there can
-	# ever read as float-colored.
+	# ever read as float-colored. Done before _drop_large_blobs below, not after: a float
+	# rendering close enough to touch a UI frame's saturated pixels (8-connected) would
+	# otherwise merge with it into one blob whose combined bounding box clears
+	# FLOAT_MAX_BLOB_SIZE even though the float's own blob alone is nowhere near it,
+	# dropping the float's real color evidence as collateral damage before this exclusion
+	# ever gets a chance to run.
 	for (x_range, y_range) in UI_EXCLUDE_REGIONS:
 		ui_x0 = max(0, int(w * x_range[0]) - search_x0)
 		ui_x1 = min(search_x1 - search_x0, int(w * x_range[1]) - search_x0)
@@ -293,6 +301,8 @@ def find_float(screenshot_path):
 		ui_y1 = min(search_y1 - search_y0, int(h * y_range[1]) - search_y0)
 		if ui_x1 > ui_x0 and ui_y1 > ui_y0:
 			color_mask[ui_y0:ui_y1, ui_x0:ui_x1] = 0
+
+	color_mask = _drop_large_blobs(color_mask, FLOAT_MAX_BLOB_SIZE)
 
 	# A moonlit/choppy-water scene can push the water's own 99.5th-percentile saturation
 	# high enough that literally nothing outside the excluded UI frames ever clears
