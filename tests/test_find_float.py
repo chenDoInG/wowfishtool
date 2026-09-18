@@ -72,11 +72,10 @@ DUSK_TOLERANCE_PX = 10   # the base's own hue is shifted too, so the click centr
 # float was rejected as just more water. Fixed by baselining off the 99.5th percentile
 # instead, which sits on that plateau rather than already inside the jump.
 EXTREME_DUSK_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'extreme_dusk_saturation.png')
-EXTREME_DUSK_EXPECTED_X, EXTREME_DUSK_EXPECTED_Y = 1027, 708
-EXTREME_DUSK_TOLERANCE_PX = 20   # same fallback caveat as the dusk case above - which
-# template ends up matching (and therefore what box height FALLBACK_VERTICAL_BIAS scales
-# against) can flip between near-tied templates as new ones are added, so this can't be
-# pinned as tightly as a single-template fallback could be
+EXTREME_DUSK_EXPECTED_X, EXTREME_DUSK_EXPECTED_Y = 1016.58, 670.76
+EXTREME_DUSK_TOLERANCE_PX = 20   # which template ends up matching (and therefore the
+# exact box the base color gets searched within) can flip between near-tied templates as
+# new ones are added, so this can't be pinned as tightly as a single-template case could be
 
 # A sunset scene where the sky's pink/purple tint carried into the water - the float
 # itself was clearly visible and well inside the search band, but none of the templates
@@ -102,9 +101,8 @@ CLIPPED_SATURATION_EXPECTED_X, CLIPPED_SATURATION_EXPECTED_Y = 914, 615
 # (grayscale shape match found it fine, at a confident 0.753) as if it were colorless.
 # Fixed by lowering the floor to 30 - see the comment on FLOAT_MIN_VALUE.
 DIM_NIGHT_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'dim_night_float.png')
-DIM_NIGHT_EXPECTED_X, DIM_NIGHT_EXPECTED_Y = 1207.5, 693.05
-DIM_NIGHT_TOLERANCE_PX = 20   # fallback click point (base color ranges don't match this
-# scene either), same caveat as the dusk/extreme-dusk fixtures above
+DIM_NIGHT_EXPECTED_X, DIM_NIGHT_EXPECTED_Y = 1243.67, 695.69
+DIM_NIGHT_TOLERANCE_PX = 20
 
 # A moonlit-choppy-water scene where the real float's own peak saturation (183) sat below
 # the water's own baseline (218 before any margin), and it also has WoW's default UI
@@ -115,8 +113,8 @@ DIM_NIGHT_TOLERANCE_PX = 20   # fallback click point (base color ranges don't ma
 # either frame from ever being the answer, and the empty-color-mask fallback (see
 # UNIFORM_DESAT below) recovers the real float once the gate is bypassed.
 UI_FRAME_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'ui_frame_false_positive.png')
-UI_FRAME_EXPECTED_X, UI_FRAME_EXPECTED_Y = 1127.5, 735.05
-UI_FRAME_TOLERANCE_PX = 20   # fallback click point, same caveat as dim_night above
+UI_FRAME_EXPECTED_X, UI_FRAME_EXPECTED_Y = 1161.16, 737.74
+UI_FRAME_TOLERANCE_PX = 20
 UI_FRAME_LEFT_FALSE_POSITIVE_X, UI_FRAME_LEFT_FALSE_POSITIVE_Y = 742, 1061
 UI_FRAME_RIGHT_FALSE_POSITIVE_X, UI_FRAME_RIGHT_FALSE_POSITIVE_Y = 1698, 1099
 
@@ -128,8 +126,21 @@ UI_FRAME_RIGHT_FALSE_POSITIVE_X, UI_FRAME_RIGHT_FALSE_POSITIVE_Y = 1698, 1099
 # numerically exceeds 255. Fixed by falling back to the grayscale shape match alone
 # whenever the color mask ends up completely empty, not just when the threshold clips.
 UNIFORM_DESAT_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'uniformly_desaturated_water.png')
-UNIFORM_DESAT_EXPECTED_X, UNIFORM_DESAT_EXPECTED_Y = 1328.5, 693.05
-UNIFORM_DESAT_TOLERANCE_PX = 20   # fallback click point, same caveat as dim_night above
+UNIFORM_DESAT_EXPECTED_X, UNIFORM_DESAT_EXPECTED_Y = 1365.30, 695.93
+UNIFORM_DESAT_TOLERANCE_PX = 20
+
+# A dark-night scene where literally every cast fell back to the geometric-center click
+# point: the base's own hue (~15-21) sat squarely inside the daylight FLOAT_BASE_COLOR_RANGES
+# window, but its saturation/value (25-131/34-106) fell well under that range's 80/100
+# floors, so it never registered as base-colored despite being clearly visible once
+# brightened for inspection. Confirmed against 8 real fallback captures from the same
+# session - 3 of 8 recovered a real color match with the added range below, the rest still
+# fall back for an unrelated reason (a weak/offset shape match not padding enough of the
+# base into the searched region at all, not a color range problem). Fixed by adding a
+# third, dimmer range with the same hue window as the daylight base - see the comment on
+# FLOAT_BASE_COLOR_RANGES.
+DIM_NIGHT_BASE_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'dim_night_base_color.png')
+DIM_NIGHT_BASE_EXPECTED_X, DIM_NIGHT_BASE_EXPECTED_Y = 1355.61, 695.46
 
 
 def test_find_float_locates_the_known_float():
@@ -254,6 +265,15 @@ def test_find_float_detects_float_when_whole_scene_is_too_desaturated_for_the_ga
 	x, y = place
 	assert abs(x - UNIFORM_DESAT_EXPECTED_X) <= UNIFORM_DESAT_TOLERANCE_PX
 	assert abs(y - UNIFORM_DESAT_EXPECTED_Y) <= UNIFORM_DESAT_TOLERANCE_PX
+
+
+def test_find_float_detects_base_color_of_a_dark_night_float():
+	place = find_float(DIM_NIGHT_BASE_FIXTURE_PATH)
+
+	assert place is not None
+	x, y = place
+	assert abs(x - DIM_NIGHT_BASE_EXPECTED_X) <= TOLERANCE_PX
+	assert abs(y - DIM_NIGHT_BASE_EXPECTED_Y) <= TOLERANCE_PX
 
 
 def test_find_float_rejects_colorless_frame(tmp_path):

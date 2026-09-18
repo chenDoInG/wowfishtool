@@ -113,6 +113,14 @@ FLOAT_MAX_BLOB_SIZE = 200
 FLOAT_BASE_COLOR_RANGES = (
 	((10, 80, 100), (35, 255, 255)),   # normal daylight warm tan/yellow base
 	((40, 30, 120), (75, 90, 255)),    # dusk/night-tinted, desaturated base
+	((10, 15, 25), (35, 140, 110)),    # same warm hue as the daylight base, but dark - a
+	# real dark-night capture measured its base at hue ~15-21 (squarely inside the
+	# daylight range above) yet saturation/value only 25-131/34-106 - both well under
+	# that range's 80/100 floors, so every cast in that session fell back to the
+	# geometric-center click point instead of a real color match, even though the float
+	# was clearly visible. Same hue window as the daylight range (this is that same base
+	# color, just dimmed by night lighting, not a different tint), with S/V floors
+	# lowered to admit it.
 )
 FLOAT_MIN_BASE_COLOR_PIXELS = 15
 
