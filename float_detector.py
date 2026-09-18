@@ -35,6 +35,27 @@ FLOAT_MATCH_THRESHOLD = 0.35
 FLOAT_SEARCH_X_RANGE = (0.25, 0.75)
 FLOAT_SEARCH_Y_RANGE = (0.38, 0.80)
 
+# Player-frame clusters (portrait, name, health/mana bars) sit at fixed screen spots that
+# land inside the band above - and they're exactly the kind of thing the adaptive color
+# gate is meant to let through: a gold-bordered icon plus solid green/blue bars is
+# comfortably more saturated than any water. On a real capture, once a genuinely
+# dim/hard-to-see float got rejected by the color gate (see FLOAT_MIN_VALUE /
+# FLOAT_SATURATION_MARGIN above), one of these frames was the next-highest-scoring thing
+# around and won outright, confidently above FLOAT_MATCH_THRESHOLD - the bot would have
+# clicked a UI element instead of the float. A screen element should never be mistaken
+# for the float regardless of how the color gate happens to score elsewhere, so both are
+# excluded outright rather than left to compete:
+#   - the default always-on player frame, bottom-left, present in every capture
+#     regardless of Edit Mode layout;
+#   - WoW's current default "Modern" Edit Mode layout additionally plants a duplicate of
+#     that same cluster near the bottom-right.
+# Both measured off a real 2560x1410 capture; padded on every side since exact placement
+# can drift a little with a different resolution or UI scale.
+UI_EXCLUDE_REGIONS = (
+	((0.26, 0.36), (0.72, 0.80)),
+	((0.62, 0.76), (0.71, 0.83)),
+)
+
 # Water/shoreline edges, ships, and even the water itself can carry a strong, fixed
 # hue - WoW tints its lighting per-zone/time-of-day (grey overcast, blue dusk, warm
 # afternoon, ...), and that tint shifts wherever a fixed HSV hue/saturation range
@@ -52,7 +73,19 @@ FLOAT_SEARCH_Y_RANGE = (0.38, 0.80)
 # margin to separate the two in that case.
 FLOAT_SATURATION_BASELINE_PERCENTILE = 99.5
 FLOAT_SATURATION_MARGIN = 20
-FLOAT_MIN_VALUE = 60   # ignore dark/shadowed pixels regardless of saturation
+
+# Guards against near-black pixels, whose saturation is numerically unstable (a tiny
+# absolute BGR difference swings the max-min/max ratio wildly), registering as
+# float-colored noise. Used to sit at 60, which was fine everywhere it got tested until
+# a real dark-night scene: the float itself renders dim there, its own clearly-saturated
+# feather pixels landing at value 39-61 - mostly *below* the old floor - while the
+# water around it never exceeds ~46 even at its own 99th percentile. So brightness can't
+# discriminate float from water in that scene at all (only saturation still can); the
+# floor's remaining job is purely rejecting actual near-black noise, which this scene's
+# water sits comfortably above (10th percentile 30). 30 admits the dimmest confirmed-real
+# float pixel logged so far with a 9-unit margin and was re-verified against every other
+# fixture logged before it.
+FLOAT_MIN_VALUE = 30
 FLOAT_MIN_COLOR_PIXELS = 15
 
 # A big saturated structure - a dock, a ship's hull - can clear the margin above too,
@@ -215,6 +248,32 @@ def find_float(screenshot_path):
 	search_area_bgr: np.ndarray = img_bgr[search_y0:search_y1, search_x0:search_x1]
 	search_area_hsv: np.ndarray = cv2.cvtColor(search_area_bgr, cv2.COLOR_BGR2HSV)
 	color_mask, color_gate_active = _adaptive_color_mask(search_area_hsv)
+
+	# Blank out each known UI player-frame's fixed spot (see UI_EXCLUDE_REGIONS above)
+	# within the search area's own local coordinates, clipped to whatever part of it
+	# actually falls inside the search band, so no candidate window anchored there can
+	# ever read as float-colored.
+	for (x_range, y_range) in UI_EXCLUDE_REGIONS:
+		ui_x0 = max(0, int(w * x_range[0]) - search_x0)
+		ui_x1 = min(search_x1 - search_x0, int(w * x_range[1]) - search_x0)
+		ui_y0 = max(0, int(h * y_range[0]) - search_y0)
+		ui_y1 = min(search_y1 - search_y0, int(h * y_range[1]) - search_y0)
+		if ui_x1 > ui_x0 and ui_y1 > ui_y0:
+			color_mask[ui_y0:ui_y1, ui_x0:ui_x1] = 0
+
+	# A moonlit/choppy-water scene can push the water's own 99.5th-percentile saturation
+	# high enough that literally nothing outside the excluded UI frames ever clears
+	# threshold - not just the float, everything, including water pixels that would
+	# ordinarily anchor a false positive elsewhere. Confirmed on a real capture: baseline
+	# 219 (threshold 239) against the float's own peak of 184, and zero pixels passing
+	# anywhere else in the whole search band either. Same failure shape as the
+	# saturation-ceiling-clip case above (the gate ends up unable to discriminate
+	# anything in this specific scene) even though the threshold itself never numerically
+	# exceeds 255 - so it gets the same treatment: stop trusting a gate that is
+	# demonstrably not separating float from water here, and fall back to the grayscale
+	# shape match alone, same as the >255 case already does.
+	if color_gate_active and not np.any(color_mask):
+		color_gate_active = False
 
 	best_val = 0
 	best_loc = None

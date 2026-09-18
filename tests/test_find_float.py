@@ -96,6 +96,41 @@ SUNSET_EXPECTED_X, SUNSET_EXPECTED_Y = 1077, 434
 CLIPPED_SATURATION_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'saturation_ceiling_clip.png')
 CLIPPED_SATURATION_EXPECTED_X, CLIPPED_SATURATION_EXPECTED_Y = 914, 615
 
+# A dark-night scene where the float itself renders dim, not just the water around it -
+# its clearly-saturated feather pixels landed at value 39-61, mostly below the old fixed
+# FLOAT_MIN_VALUE=60 floor, so the color gate rejected the float's own correct location
+# (grayscale shape match found it fine, at a confident 0.753) as if it were colorless.
+# Fixed by lowering the floor to 30 - see the comment on FLOAT_MIN_VALUE.
+DIM_NIGHT_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'dim_night_float.png')
+DIM_NIGHT_EXPECTED_X, DIM_NIGHT_EXPECTED_Y = 1207.5, 693.05
+DIM_NIGHT_TOLERANCE_PX = 20   # fallback click point (base color ranges don't match this
+# scene either), same caveat as the dusk/extreme-dusk fixtures above
+
+# A moonlit-choppy-water scene where the real float's own peak saturation (183) sat below
+# the water's own baseline (218 before any margin), and it also has WoW's default UI
+# player-frame cluster sitting in the search band twice (the always-on frame bottom-left,
+# plus the "Modern" Edit Mode layout's duplicate bottom-right) - both far more saturated
+# than the water and, once the real float lost the color gate, high-scoring enough to
+# confidently win in the real float's place. Fixed in two parts: UI_EXCLUDE_REGIONS keeps
+# either frame from ever being the answer, and the empty-color-mask fallback (see
+# UNIFORM_DESAT below) recovers the real float once the gate is bypassed.
+UI_FRAME_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'ui_frame_false_positive.png')
+UI_FRAME_EXPECTED_X, UI_FRAME_EXPECTED_Y = 1127.5, 735.05
+UI_FRAME_TOLERANCE_PX = 20   # fallback click point, same caveat as dim_night above
+UI_FRAME_LEFT_FALSE_POSITIVE_X, UI_FRAME_LEFT_FALSE_POSITIVE_Y = 742, 1061
+UI_FRAME_RIGHT_FALSE_POSITIVE_X, UI_FRAME_RIGHT_FALSE_POSITIVE_Y = 1698, 1099
+
+# The same moonlit-choppy-water scene as above, but this time literally nothing in the
+# whole search band (outside the excluded UI frames) clears the color gate - not the
+# float, not any other water pixel either: baseline 219 (threshold 239) against the
+# float's own peak of 184. Same failure shape as the saturation-ceiling-clip case (the
+# gate can't discriminate anything in this scene) even though the threshold never
+# numerically exceeds 255. Fixed by falling back to the grayscale shape match alone
+# whenever the color mask ends up completely empty, not just when the threshold clips.
+UNIFORM_DESAT_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'uniformly_desaturated_water.png')
+UNIFORM_DESAT_EXPECTED_X, UNIFORM_DESAT_EXPECTED_Y = 1328.5, 693.05
+UNIFORM_DESAT_TOLERANCE_PX = 20   # fallback click point, same caveat as dim_night above
+
 
 def test_find_float_locates_the_known_float():
 	place = find_float(FIXTURE_PATH)
@@ -189,6 +224,36 @@ def test_find_float_detects_float_when_water_saturation_clips_the_color_gate():
 	x, y = place
 	assert abs(x - CLIPPED_SATURATION_EXPECTED_X) <= TOLERANCE_PX
 	assert abs(y - CLIPPED_SATURATION_EXPECTED_Y) <= TOLERANCE_PX
+
+
+def test_find_float_detects_dim_float_in_dark_night_scene():
+	place = find_float(DIM_NIGHT_FIXTURE_PATH)
+
+	assert place is not None
+	x, y = place
+	assert abs(x - DIM_NIGHT_EXPECTED_X) <= DIM_NIGHT_TOLERANCE_PX
+	assert abs(y - DIM_NIGHT_EXPECTED_Y) <= DIM_NIGHT_TOLERANCE_PX
+
+
+def test_find_float_ignores_default_ui_player_frames():
+	place = find_float(UI_FRAME_FIXTURE_PATH)
+
+	assert place is not None
+	x, y = place
+	assert abs(x - UI_FRAME_EXPECTED_X) <= UI_FRAME_TOLERANCE_PX
+	assert abs(y - UI_FRAME_EXPECTED_Y) <= UI_FRAME_TOLERANCE_PX
+	# also explicitly guard against regressing back onto either UI frame
+	assert abs(x - UI_FRAME_LEFT_FALSE_POSITIVE_X) > TOLERANCE_PX or abs(y - UI_FRAME_LEFT_FALSE_POSITIVE_Y) > TOLERANCE_PX
+	assert abs(x - UI_FRAME_RIGHT_FALSE_POSITIVE_X) > TOLERANCE_PX or abs(y - UI_FRAME_RIGHT_FALSE_POSITIVE_Y) > TOLERANCE_PX
+
+
+def test_find_float_detects_float_when_whole_scene_is_too_desaturated_for_the_gate():
+	place = find_float(UNIFORM_DESAT_FIXTURE_PATH)
+
+	assert place is not None
+	x, y = place
+	assert abs(x - UNIFORM_DESAT_EXPECTED_X) <= UNIFORM_DESAT_TOLERANCE_PX
+	assert abs(y - UNIFORM_DESAT_EXPECTED_Y) <= UNIFORM_DESAT_TOLERANCE_PX
 
 
 def test_find_float_rejects_colorless_frame(tmp_path):
