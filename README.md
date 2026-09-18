@@ -74,15 +74,14 @@ Environment`),没装过 Python 的话 PyCharm 还能顺带帮你下载安装。
 
 ### 2. 系统权限(容易漏掉,漏了会表现成"脚本跑了但鼠标/键盘没反应")
 
-脚本靠 `pyautogui`/`pynput` 模拟鼠标键盘、靠截图识别画面,这两件事在 macOS 上都需要单独授权,
+**macOS**:脚本靠 `pyautogui`/`pynput` 模拟鼠标键盘、靠截图识别画面,这两件事都需要单独授权,
 而且授权对象是**实际运行 Python 的那个程序**(终端、PyCharm 或其他 IDE),不是 Python 本身:
 
 ```text
-# macOS
-系统设置 → 隐私与安全性 → 辅助功能 → 加入并勾选"终端"/"PyCharm"   # 控制鼠标键盘要用
-系统设置 → 隐私与安全性 → 屏幕录制 → 加入并勾选"终端"/"PyCharm"   # 截图要用，macOS 10.15+
-                                                                #  强制要求，不给权限
-                                                                #  会黑屏/全黑截图
+系统设置 → 隐私与安全性 → 辅助功能 → 加入并勾选"终端"/"PyCharm"
+  # 控制鼠标键盘要用
+系统设置 → 隐私与安全性 → 屏幕录制 → 加入并勾选"终端"/"PyCharm"
+  # 截图要用，macOS 10.15+ 强制要求，不给权限会黑屏/全黑截图
 重启终端/IDE
   # 改动权限后必须重启才会生效，改完立刻测试大概率还是不行，先重启一遍
 
@@ -90,9 +89,9 @@ Environment`),没装过 Python 的话 PyCharm 还能顺带帮你下载安装。
 # 正常传到别的窗口，不用开游戏
 ```
 
-如果 WoW 是以管理员身份运行的,模拟鼠标键盘的进程权限必须**跟游戏一致**,否则 Windows 的
-UIPI(用户界面特权隔离)会静默丢弃"权限低的进程发给权限高的窗口"的输入事件,表现就是脚本日志
-一切正常、但游戏里毫无反应:
+**Windows**:如果 WoW 是以管理员身份运行的,模拟鼠标键盘的进程权限必须**跟游戏一致**,否则
+Windows 的 UIPI(用户界面特权隔离)会静默丢弃"权限低的进程发给权限高的窗口"的输入事件,表现
+就是脚本日志一切正常、但游戏里毫无反应:
 
 ```text
 # Windows —— 二选一，不要一边有一边没有
@@ -182,24 +181,35 @@ brew install portaudio
 PortAudio 打包进去了),覆盖 Python 3.8~3.13、32/64 位,正常情况下不需要单独装 PortAudio、
 也不需要装 Visual Studio 编译工具,`pip install -r requirements.txt` 跟着装完就行。
 
+推荐用 PyCharm 的话,**下面这些命令都在 PyCharm 底部的"终端"面板里敲**(不是另外新开一个
+系统自带的 PowerShell/命令提示符窗口)——见上面"0. Windows 新手向导",这个面板默认已经
+帮你切到了项目的虚拟环境,不用自己再 `activate` 一次:
+
+```text
+pip install -r requirements.txt
+```
+
 如果装 `pyaudio` 这一步报错(常见报错是类似 "Microsoft Visual C++ 14.0 or greater is
 required" 或者 "ERROR: No matching distribution found for pyaudio"),说明 pip 没找到对应
-你 Python 版本的现成 wheel,想自己编译又缺编译环境,按顺序试:
+你 Python 版本的现成 wheel,想自己编译又缺编译环境,在同一个终端面板里按顺序试:
 
-1. **先确认 pip 是最新的**,旧版本 pip 有时候认不出新发布的 wheel:
+```text
+python -m pip install --upgrade pip
+  # 先确认 pip 是最新的，旧版本 pip 有时候认不出新发布的 wheel
 
-   ```powershell
-   python -m pip install --upgrade pip
-   ```
+python --version
+  # 再确认 Python 版本和位数有没有现成 wheel：打开
+  # https://pypi.org/project/PyAudio/#files ，文件名里 cp312 对应 Python 3.12、
+  # win_amd64 是 64 位、win32 是 32 位，对照这里的版本号看有没有匹配的 .whl。
+  # 如果 Python 版本太新、还没发布对应 wheel，最省事的办法是回到 File → Settings →
+  # Project → Python Interpreter，换一个稍旧一点、肯定有 wheel 的版本（比如 3.11
+  # 或 3.12）重新建一个虚拟环境（见"0. Windows 新手向导"第 3 步）
 
-2. **再确认 Python 版本和位数有没有现成 wheel**:打开
-   [PyPI 上 PyAudio 的 Files 页面](https://pypi.org/project/PyAudio/#files),文件名里
-   `cp312` 对应 Python 3.12、`win_amd64` 是 64 位、`win32` 是 32 位——对照你的 Python
-   版本(`python --version`)看有没有匹配的 `.whl`。如果你的 Python 版本太新、还没发布
-   对应 wheel,最省事的办法是换一个稍旧一点、肯定有 wheel 的 Python 版本(比如 3.11 或
-   3.12)重新建虚拟环境
+pip install -r requirements.txt
+  # 换完解释器/升级完 pip 之后重新装一次
+```
 
-两边都一样:
+macOS 也是同一条命令,在普通终端里敲就行:
 
 ```bash
 pip install -r requirements.txt
@@ -220,19 +230,19 @@ pip install -r requirements.txt
 ### 用 PyCharm 运行(Windows)
 
 ```text
-文件 → 打开 → 选中这个项目文件夹（包含 fishing.py 的那一层）
+File → Open → 选中这个项目文件夹（包含 fishing.py 的那一层）
 
-文件 → 设置 → 项目: wow-fishing → Python 解释器
-  # 确认右上角下拉框显示的是项目里的虚拟环境（形如 ...\wow-fishing\.venv\Scripts\python.exe），
-  # 不是系统全局 Python；列表里没有的话，点"添加解释器" → "Virtualenv 环境"，
-  # 指向项目根目录下的 .venv 文件夹（前提是已经按"环境准备"那步建好了）
+File → Settings → Project: <项目名> → Python Interpreter
+  # 确认右上角下拉框显示的是项目里的虚拟环境（形如 ...\wowfishtool\.venv\Scripts\python.exe），
+  # 不是系统全局 Python；列表里没有的话，点 Add Interpreter → Add Local Interpreter →
+  # Virtualenv Environment，指向项目根目录下的 .venv 文件夹（前提是已经按"环境准备"那步建好了）
 
 PyCharm 底部"终端"面板 → pip install -r requirements.txt
   # 是标签写着"终端"的那个面板（不是"Python 控制台"/"Python 进程输出"），它默认会
   # 自动激活项目的虚拟环境；如果 PyCharm 自己弹出"检测到 requirements.txt，是否安装"
   # 的提示，点安装也可以，效果一样
 
-左侧项目树双击 fishing.py → 点编辑器行号左边的绿色三角形（或右键文件 → 运行 'fishing'）
+左侧项目树双击 fishing.py → 点编辑器行号左边的绿色三角形（或右键文件 → Run 'fishing'）
   # PyCharm 会在底部"运行"面板里启动脚本 —— 这个面板只用来看输出，不能在里面手动敲命令，
   # 跟"终端"面板是两回事，不要混
 
@@ -341,7 +351,7 @@ HSV 上限"那种更极端的场景用的是同一套降级逻辑。如果还是
 `float_detector.py` 里的颜色门槛专挑"比水面更艳"的像素,而角色自己的状态框(金色描边的
 头像图标、绿色血条、蓝色蓝条)正好就是又艳又亮,一旦上面那条"极暗夜晚"薄弱点命中——真正的
 鱼漂因为太暗/太不显眼被颜色门槛刷掉——算法会转而在剩下能通过颜色门槛的区域里挑分数最高的,
-状态框就有可能顶上来,让脚本很confident 地点到状态框而不是鱼漂上。
+状态框就有可能顶上来,让脚本很自信地点到状态框而不是鱼漂上。
 
 已经把两个已知会撞上这个问题的位置从搜索范围里显式排除掉了(`float_detector.py` 里的
 `UI_EXCLUDE_REGIONS`,按屏幕宽高的百分比定义):
@@ -356,6 +366,23 @@ HSV 上限"那种更极端的场景用的是同一套降级逻辑。如果还是
 换算成宽高百分比后加进 `UI_EXCLUDE_REGIONS` 里(格式是 `((x0, x1), (y0, y1))`,数值都是
 0~1 之间的屏幕宽/高占比)。
 
+⚠️ **反过来的坑**:`UI_EXCLUDE_REGIONS` 是无条件把这两块屏幕位置的颜色证据清零的,不管
+那一刻画面里实际是不是状态框。如果调整视角/镜头之后,鱼漂真的落点(不是状态框)刚好也落在
+这两块区域里,颜色门槛会把它当成"这里不可能是鱼漂"直接清零,鱼漂就算再清晰可见也永远识别
+不到——这是排除状态框这个修复自带的盲区,不是识别逻辑本身的问题。两块区域大致在屏幕宽度
+26%~36% 和 62%~76%、高度 71%~83% 这一片(左下角状态框和右下角 Modern 布局那份副本的位置),
+调整站位/镜头角度,让鱼漂落点落在这一片区域**上方**(也就是不要让抛竿落点太靠近角色本体,
+钓稍微远一点的水面),就能避开这个盲区。这跟"命令行运行"那节"镜头拉到最近"的建议不冲突——
+那条是为了不让人物模型挡住水面,这里说的是落点具体落在屏幕哪个高度,两者互不影响。
+
+![红框是鱼漂应该落点的安全区域,红框下方(图中未画出)就是那两块 UI 状态框固定占据、
+会被强制排除、永远识别不到的区域](docs/float_safe_zone.png)
+
+红框范围就是 `FLOAT_SEARCH_X_RANGE`/`FLOAT_SEARCH_Y_RANGE` 去掉底下这条排除带之后剩下的
+部分,鱼漂(红框里那个小图标)落在红框内才有机会被找到;这张截图这个角色的 UI 布局里
+红框下方刚好没有状态框挡着,所以看不出排除区域实际长什么样,具体位置参考上面"两个已知会
+撞上这个问题的位置"那段的百分比数字,或者对照 `UI_EXCLUDE_REGIONS` 里的定义。
+
 ## 运行测试
 
 ```bash
@@ -367,8 +394,8 @@ pytest
 
 `tests/test_click.py`、`tests/test_listen.py` 是需要人工确认结果的手动诊断脚本,**当成普通
 Python 脚本运行**(`python tests/test_click.py`),不是自动化测试,里面没有 `test_` 开头的
-用例函数。用 PyCharm 右键运行的话,注意选"运行 'test_click'"这个选项,不要选成"运行 pytest
-in test_click.py"——PyCharm 有时候看到 `tests/` 目录会默认建议用 pytest 方式运行,选错了会
+用例函数。用 PyCharm 右键运行的话,注意选 "Run 'test_click'" 这个选项,不要选成 "Run
+'pytest in test_click.py'"——PyCharm 有时候看到 `tests/` 目录会默认建议用 pytest 方式运行,选错了会
 显示"collected 0 items",什么都不会执行,不是脚本本身有问题。直接运行查看输出即可:
 
 - `test_click.py`:验证模拟右键点击能不能实际传到别的窗口/程序,主要用来排查 macOS 辅助功能
