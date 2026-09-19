@@ -164,7 +164,7 @@ WARM_DUSK_GATE_MISS_EXPECTED_X, WARM_DUSK_GATE_MISS_EXPECTED_Y = 1438, 800
 # own base into one 224x157 blob with the surrounding water. _drop_large_blobs correctly
 # dropped that fused blob (it clears FLOAT_MAX_BLOB_SIZE), but the scattered few-pixel
 # fragments left over elsewhere in the padded region still summed past
-# FLOAT_MIN_BASE_COLOR_PIXELS, centroiding to a point ~85px from the float - confidently
+# the summed-pixel floor, centroiding to a point ~85px from the float - confidently
 # wrong rather than correctly falling back. Fixed by also requiring the single largest
 # surviving component to look like a real blob - see FLOAT_MIN_BASE_BLOB_AREA.
 CLICK_NOISE_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'warm_water_gate_click_noise.png')
@@ -340,7 +340,7 @@ def test_adaptive_color_mask_does_not_drop_large_blobs_itself():
 	hsv[:, :, 2] = 150
 	hsv[100:120, 50:300, 1] = 200   # 250px wide - well over FLOAT_MAX_BLOB_SIZE
 
-	mask, _ = _adaptive_color_mask(hsv)
+	mask = _adaptive_color_mask(hsv)
 
 	assert int((mask[100:120, 50:300] > 0).sum()) == 250 * 20
 
@@ -361,8 +361,7 @@ def test_find_float_keeps_a_float_touching_a_ui_frame_blob():
 	hsv[200:210, 100:140, 1] = 200   # float-sized patch: 40x10
 	hsv[200:210, 140:310, 1] = 200   # UI-sized patch touching it: 170x10
 
-	mask, gate_reliable = _adaptive_color_mask(hsv)
-	assert gate_reliable
+	mask = _adaptive_color_mask(hsv)
 	# Simulate find_float()'s actual composition order: blank the UI area first, only
 	# then drop oversized blobs.
 	mask[195:215, 140:310] = 0
@@ -373,14 +372,38 @@ def test_find_float_keeps_a_float_touching_a_ui_frame_blob():
 
 def test_find_float_rejects_colorless_frame(tmp_path):
 	# A flat grey frame - standing in for WoW's disconnect/login/character-select
-	# screens, which have no saturated pixels at all. The color gate must stay active
-	# here (low water_baseline, nowhere near the 255 ceiling) and correctly reject
-	# whatever the grayscale-only template correlation happens to score on plain grey -
-	# guards against the saturation-ceiling fix above (color_gate_active in find_float())
-	# ever being broadened into skipping the gate on any empty mask, not just the
-	# specific "threshold exceeds 255" case it's meant for.
+	# screens, which have no saturated pixels at all. The gate finds nothing here, so
+	# find_float() falls back to the ungated grayscale score (see _pick_match()) - which
+	# must itself stay under FLOAT_MATCH_THRESHOLD on plain grey, or this frame would
+	# read as a float.
 	blank_frame = np.full((1050, 1893, 3), 120, dtype=np.uint8)
 	frame_path = tmp_path / 'colorless_frame.png'
 	cv2.imwrite(str(frame_path), blank_frame)
 
 	assert find_float(str(frame_path)) is None
+
+
+def _frame_with_float_at(center_x, center_y, tmp_path):
+	"""Flat 2560x1410 grey frame with a real float template pasted so its center lands
+	at (center_x, center_y), saved to disk; returns the path."""
+	template = cv2.imread('var/fishing_float_1.png')
+	th, tw = template.shape[:2]
+	frame = np.full((1410, 2560, 3), 120, dtype=np.uint8)
+	x0, y0 = center_x - tw // 2, center_y - th // 2
+	frame[y0:y0 + th, x0:x0 + tw] = template
+	path = tmp_path / 'frame.png'
+	cv2.imwrite(str(path), frame)
+	return str(path)
+
+
+def test_find_float_ignores_a_perfect_match_inside_a_ui_exclude_region(tmp_path):
+	"""UI_EXCLUDE_REGIONS must hold on the ungated grayscale fallback too, not just in the
+	color mask: a pixel-exact template match sitting inside the player-frame region
+	scores ~1.0 ungated, and must still not be returned."""
+	assert find_float(_frame_with_float_at(790, 1070, tmp_path)) is None
+
+
+def test_find_float_still_finds_the_same_match_outside_ui_exclude_regions(tmp_path):
+	"""Control for the test above: the identical pasted float, moved out of every UI
+	region, is found."""
+	assert find_float(_frame_with_float_at(1280, 800, tmp_path)) is not None
