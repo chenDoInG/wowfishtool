@@ -1,4 +1,4 @@
-"""Regression test for find_float()'s template-matching logic.
+"""Regression tests for find_float()'s template-matching logic.
 
 Uses frozen sample screenshots (not the live var/fishing_session.png, which gets
 overwritten every time the bot actually runs) with known, visually-verified float
@@ -9,321 +9,65 @@ import os
 
 import cv2
 import numpy as np
+import pytest
 
-from float_detector import FLOAT_MAX_BLOB_SIZE, _adaptive_color_mask, _drop_large_blobs, find_float
+from float_detector import (FLOAT_MAX_BLOB_SIZE, _adaptive_color_mask, _build_color_mask, _drop_large_blobs, _Match,
+								_pick_match, find_float)
 
-FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'sample_screenshot.png')
-EXPECTED_X, EXPECTED_Y = 1362.75, 660.5
+FIXTURE_DIR = os.path.join(os.path.dirname(__file__), 'fixtures')
 TOLERANCE_PX = 20
 
-# A shoreline color-boundary line used to out-score the real float on pure grayscale
-# template matching, landing the click on plain water. Regression fixture for that:
-# the real float sits around (1117, 634), the false positive was at (1078, 789).
-SHORELINE_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'shoreline_false_positive.png')
-SHORELINE_EXPECTED_X, SHORELINE_EXPECTED_Y = 1117, 634
-SHORELINE_FALSE_POSITIVE_X, SHORELINE_FALSE_POSITIVE_Y = 1078, 789
-
-# A distant ship near the horizon had both a saturated warm (lit window) and cool (hull)
-# color close together, passing the color check too, and out-scored the real float on
-# grayscale correlation. Fixed by restricting the search band to where a nearby cast
-# actually lands - well below where anything at/near the horizon (like a ship) sits.
-SHIP_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'ship_false_positive.png')
-SHIP_EXPECTED_X, SHIP_EXPECTED_Y = 1366, 851
-SHIP_FALSE_POSITIVE_X, SHIP_FALSE_POSITIVE_Y = 700, 440
-
-# Under overcast/dim lighting the blue feather's saturation drops well below what the
-# cool color range required, so the float was rejected as colorless and never found.
-DESATURATED_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'desaturated_feather.png')
-DESATURATED_EXPECTED_X, DESATURATED_EXPECTED_Y = 1087, 796
-
-# Backlit against a bright hazy sky, the feather's blue washed out to near the water's
-# own saturation noise floor - too close to fix with a saturation threshold, so the
-# cool-color requirement was dropped in favor of relying on the warm bobber base color
-# (still strongly saturated here) plus the search-band restriction that already
-# independently keeps distant objects like ships out.
-BACKLIT_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'backlit_float.png')
-BACKLIT_EXPECTED_X, BACKLIT_EXPECTED_Y = 1355, 688
-
-# Flat, calm Stormwind canal water gave every template a much weaker grayscale
-# correlation than the choppy open-ocean scenes they were captured from - even a
-# hand-picked crop known to contain the float peaked next to it, not on it. Fixed by
-# adding a template captured from this exact scene rather than any matching-logic change.
-STORMWIND_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'stormwind_canal.png')
-STORMWIND_EXPECTED_X, STORMWIND_EXPECTED_Y = 1399, 576
-# The wooden dock/boat railing visible in this same screenshot is locally more
-# saturated than the canal water too, and used to win once the color check stopped
-# requiring a specific hue - only excluded once large connected color blobs (a dock
-# spans hundreds of pixels; the float's never has) got dropped before gating.
-STORMWIND_FALSE_POSITIVE_X, STORMWIND_FALSE_POSITIVE_Y = 1304, 898
-
-# A deep-blue dusk sea shifted the float's colors so far around the hue wheel (the red
-# feather reading as magenta, ~160 hue, instead of its usual ~0-10) that no fixed hue
-# range could find it at all, and the water itself was saturated enough that no fixed
-# saturation floor worked either - fixed by gating on saturation relative to this
-# scene's own water instead of a fixed absolute range.
-DUSK_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'dusk_saturated_water.png')
-DUSK_EXPECTED_X, DUSK_EXPECTED_Y = 1245, 695
-DUSK_TOLERANCE_PX = 10   # the base's own hue is shifted too, so the click centroid falls
-# back to FALLBACK_VERTICAL_BIAS (see float_detector.py) rather than a real color match
-
-# An even more saturated sea plateaued right up through its own 99th percentile before
-# jumping sharply at the float's outlier pixels - baselining off the 90th percentile
-# left too little headroom below FLOAT_SATURATION_MARGIN to tell the two apart, so the
-# float was rejected as just more water. Fixed by baselining off the 99.5th percentile
-# instead, which sits on that plateau rather than already inside the jump.
-EXTREME_DUSK_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'extreme_dusk_saturation.png')
-EXTREME_DUSK_EXPECTED_X, EXTREME_DUSK_EXPECTED_Y = 1016.58, 670.76
-EXTREME_DUSK_TOLERANCE_PX = 20   # which template ends up matching (and therefore the
-# exact box the base color gets searched within) can flip between near-tied templates as
-# new ones are added, so this can't be pinned as tightly as a single-template case could be
-
-# A sunset scene where the sky's pink/purple tint carried into the water - the float
-# itself was clearly visible and well inside the search band, but none of the templates
-# captured up to that point matched it above FLOAT_MATCH_THRESHOLD at its real position
-# (matches that did clear the threshold were all at other, wrong locations). Fixed by
-# adding fishing_float_6.png, cropped from this exact scene.
-SUNSET_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'sunset_purple_water.png')
-SUNSET_EXPECTED_X, SUNSET_EXPECTED_Y = 1077, 434
-
-# Water saturated enough that 17% of the search band's pixels sat at the HSV ceiling
-# (255) meant the 99.5th-percentile baseline itself came out to 255 - adding
-# FLOAT_SATURATION_MARGIN on top pushed the required threshold past the maximum
-# representable saturation, so zero pixels anywhere could ever pass the color gate
-# regardless of the float's own color. The float's template match still scored a
-# confident 0.659 on grayscale alone. Fixed by skipping the color gate entirely when it
-# would zero out the whole search area, trusting the template score alone instead.
-CLIPPED_SATURATION_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'saturation_ceiling_clip.png')
-CLIPPED_SATURATION_EXPECTED_X, CLIPPED_SATURATION_EXPECTED_Y = 914, 615
-
-# A dark-night scene where the float itself renders dim, not just the water around it -
-# its clearly-saturated feather pixels landed at value 39-61, mostly below the old fixed
-# FLOAT_MIN_VALUE=60 floor, so the color gate rejected the float's own correct location
-# (grayscale shape match found it fine, at a confident 0.753) as if it were colorless.
-# Fixed by lowering the floor to 30 - see the comment on FLOAT_MIN_VALUE.
-DIM_NIGHT_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'dim_night_float.png')
-DIM_NIGHT_EXPECTED_X, DIM_NIGHT_EXPECTED_Y = 1243.67, 695.69
-DIM_NIGHT_TOLERANCE_PX = 20
-
-# A moonlit-choppy-water scene where the real float's own peak saturation (183) sat below
-# the water's own baseline (218 before any margin), and it also has WoW's default UI
-# player-frame cluster sitting in the search band twice (the always-on frame bottom-left,
-# plus the "Modern" Edit Mode layout's duplicate bottom-right) - both far more saturated
-# than the water and, once the real float lost the color gate, high-scoring enough to
-# confidently win in the real float's place. Fixed in two parts: UI_EXCLUDE_REGIONS keeps
-# either frame from ever being the answer, and the empty-color-mask fallback (see
-# UNIFORM_DESAT below) recovers the real float once the gate is bypassed.
-UI_FRAME_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'ui_frame_false_positive.png')
-UI_FRAME_EXPECTED_X, UI_FRAME_EXPECTED_Y = 1161.16, 737.74
-UI_FRAME_TOLERANCE_PX = 20
-UI_FRAME_LEFT_FALSE_POSITIVE_X, UI_FRAME_LEFT_FALSE_POSITIVE_Y = 742, 1061
-UI_FRAME_RIGHT_FALSE_POSITIVE_X, UI_FRAME_RIGHT_FALSE_POSITIVE_Y = 1698, 1099
-
-# The same moonlit-choppy-water scene as above, but this time literally nothing in the
-# whole search band (outside the excluded UI frames) clears the color gate - not the
-# float, not any other water pixel either: baseline 219 (threshold 239) against the
-# float's own peak of 184. Same failure shape as the saturation-ceiling-clip case (the
-# gate can't discriminate anything in this scene) even though the threshold never
-# numerically exceeds 255. Fixed by falling back to the grayscale shape match alone
-# whenever the color mask ends up completely empty, not just when the threshold clips.
-UNIFORM_DESAT_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'uniformly_desaturated_water.png')
-UNIFORM_DESAT_EXPECTED_X, UNIFORM_DESAT_EXPECTED_Y = 1365.30, 695.93
-UNIFORM_DESAT_TOLERANCE_PX = 20
-
-# A dark-night scene where literally every cast fell back to the geometric-center click
-# point: the base's own hue (~15-21) sat squarely inside the daylight FLOAT_BASE_COLOR_RANGES
-# window, but its saturation/value (25-131/34-106) fell well under that range's 80/100
-# floors, so it never registered as base-colored despite being clearly visible once
-# brightened for inspection. Confirmed against 8 real fallback captures from the same
-# session - 3 of 8 recovered a real color match with the added range below, the rest still
-# fall back for an unrelated reason (a weak/offset shape match not padding enough of the
-# base into the searched region at all, not a color range problem). Fixed by adding a
-# third, dimmer range with the same hue window as the daylight base - see the comment on
-# FLOAT_BASE_COLOR_RANGES.
-DIM_NIGHT_BASE_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'dim_night_base_color.png')
-DIM_NIGHT_BASE_EXPECTED_X, DIM_NIGHT_BASE_EXPECTED_Y = 1355.61, 695.46
-
-# A heavily orange-tinted dusk sea (logged live as a "not found" miss, not a bad-click
-# fallback) where the water's own 99.5th-percentile saturation already sat at 190, so the
-# adaptive threshold (210) was higher than the float's own base ever reached in this
-# lighting (measured 70-140) - the gate rejected the float's true position outright. The
-# "gate found nothing anywhere" escape hatch didn't fire here, unlike UNIFORM_DESAT/
-# CLIPPED_SATURATION above: unrelated scattered pixels elsewhere in the search band (not
-# shaped anything like the float) happened to clear that same threshold, keeping the mask
-# non-empty and the gate looking "active" even though it still couldn't discriminate the
-# float from water. Confirmed real: grayscale alone scored 0.53-0.7 at the float's actual
-# position (comfortably within the confirmed-real range noted on FLOAT_MATCH_THRESHOLD),
-# while every gated candidate topped out at 0.24-0.34. Fixed by also falling back to the
-# grayscale-only match when the gate accepts nothing above FLOAT_MATCH_THRESHOLD anywhere,
-# not just when its mask is completely empty.
-WARM_DUSK_GATE_MISS_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'warm_dusk_gate_miss.png')
-WARM_DUSK_GATE_MISS_EXPECTED_X, WARM_DUSK_GATE_MISS_EXPECTED_Y = 1438, 800
-
-# A different warm-dusk capture (same session, box-location matching worked fine here -
-# grayscale scored 0.594 right on the float) where the water's own color fell inside the
-# base's daylight FLOAT_BASE_COLOR_RANGES over a wide contiguous area, fusing the float's
-# own base into one 224x157 blob with the surrounding water. _drop_large_blobs correctly
-# dropped that fused blob (it clears FLOAT_MAX_BLOB_SIZE), but the scattered few-pixel
-# fragments left over elsewhere in the padded region still summed past
-# the summed-pixel floor, centroiding to a point ~85px from the float - confidently
-# wrong rather than correctly falling back. Fixed by also requiring the single largest
-# surviving component to look like a real blob - see FLOAT_MIN_BASE_BLOB_AREA.
-CLICK_NOISE_FIXTURE_PATH = os.path.join(os.path.dirname(__file__), 'fixtures', 'warm_water_gate_click_noise.png')
-CLICK_NOISE_EXPECTED_X, CLICK_NOISE_EXPECTED_Y = 1388, 765
-CLICK_NOISE_TOLERANCE_PX = 40   # the fix only restores the existing geometric-center
-# fallback (falling back is still correct here - the base's true color is indistinguishable
-# from the water over a wide area, so there's no real color match to be had), which is
-# intentionally looser than a real color-matched click - see FALLBACK_VERTICAL_BIAS
+# (fixture, expected (x, y), tolerance, spots that must NOT be returned, what it guards)
+FLOAT_CASES = [
+	('ship_false_positive.png', (1366, 851), TOLERANCE_PX, [(700, 440)],
+	 'a distant ship near the horizon has saturated warm+cool colors and out-scored the '
+	 'float; fixed by restricting the search band to where a nearby cast lands (the '
+	 'same open-sea capture also covers the old shoreline color-boundary false positive)'),
+	('desaturated_feather.png', (1087, 796), TOLERANCE_PX, [],
+	 'overcast lighting drops the blue feather well below any fixed saturation floor'),
+	('backlit_float.png', (1355, 688), TOLERANCE_PX, [],
+	 'backlit against a hazy sky the feather washes out to water level - relies on the '
+	 'warm base color instead'),
+	('stormwind_canal.png', (1399, 576), TOLERANCE_PX, [(1304, 898)],
+	 'flat canal water weakens every template (fixed with a scene-specific template); the '
+	 'dock/railing is locally more saturated and must be dropped as a large blob'),
+	('dusk_saturated_water.png', (1245, 695), 10, [],
+	 'deep-blue dusk sea shifts the float hues around the wheel - needs the adaptive '
+	 'saturation gate; the base hue is shifted too, so the click falls back to '
+	 'FALLBACK_VERTICAL_BIAS, hence the tighter tolerance'),
+	('sunset_purple_water.png', (1077, 434), TOLERANCE_PX, [],
+	 'pink/purple sunset water; no template matched until fishing_float_6.png was added'),
+	('saturation_ceiling_clip.png', (914, 615), TOLERANCE_PX, [],
+	 'water so saturated the gate threshold exceeds 255 - the gate passes nothing, so '
+	 'the ungated grayscale match must carry it (score 0.659)'),
+	('dim_night_float.png', (1243.67, 695.69), TOLERANCE_PX, [],
+	 'dark night: the float itself renders dim (feather value 39-61), below the old '
+	 'FLOAT_MIN_VALUE=60'),
+	('dim_night_base_color.png', (1355.61, 695.46), TOLERANCE_PX, [],
+	 'dark night base: hue inside the daylight range but S/V far below its floors, so '
+	 'every cast fell back to the geometric center; needs the dim base color range'),
+	('warm_dusk_gate_miss.png', (1438, 800), TOLERANCE_PX, [],
+	 'orange dusk: the gate rejects the float\'s true position while unrelated scattered '
+	 'pixels keep it "active" - grayscale alone scored 0.53-0.7 at the float, gated '
+	 'candidates only 0.24-0.34'),
+	('warm_water_gate_click_noise.png', (1388, 765), 40, [],
+	 'warm water fuses the base into one giant blob that gets dropped; leftover fragments '
+	 'summed to a confident-but-wrong centroid ~85px off. Correct answer is the '
+	 'geometric-center fallback, hence the looser tolerance (see FALLBACK_VERTICAL_BIAS)'),
+]
 
 
-def test_find_float_locates_the_known_float():
-	place = find_float(FIXTURE_PATH)
+@pytest.mark.parametrize('fixture, expected, tolerance, forbidden, why', FLOAT_CASES,
+						 ids=[case[0].removesuffix('.png') for case in FLOAT_CASES])
+def test_find_float_locates_the_float(fixture, expected, tolerance, forbidden, why):
+	place = find_float(os.path.join(FIXTURE_DIR, fixture))
 
-	assert place is not None
+	assert place is not None, why
 	x, y = place
-	assert abs(x - EXPECTED_X) <= TOLERANCE_PX
-	assert abs(y - EXPECTED_Y) <= TOLERANCE_PX
-
-
-def test_find_float_rejects_shoreline_false_positive():
-	place = find_float(SHORELINE_FIXTURE_PATH)
-
-	assert place is not None
-	x, y = place
-	assert abs(x - SHORELINE_EXPECTED_X) <= TOLERANCE_PX
-	assert abs(y - SHORELINE_EXPECTED_Y) <= TOLERANCE_PX
-	# also explicitly guard against regressing back onto the old false-positive spot
-	assert abs(x - SHORELINE_FALSE_POSITIVE_X) > TOLERANCE_PX or abs(y - SHORELINE_FALSE_POSITIVE_Y) > TOLERANCE_PX
-
-
-def test_find_float_ignores_distant_ship():
-	place = find_float(SHIP_FIXTURE_PATH)
-
-	assert place is not None
-	x, y = place
-	assert abs(x - SHIP_EXPECTED_X) <= TOLERANCE_PX
-	assert abs(y - SHIP_EXPECTED_Y) <= TOLERANCE_PX
-	assert abs(x - SHIP_FALSE_POSITIVE_X) > TOLERANCE_PX or abs(y - SHIP_FALSE_POSITIVE_Y) > TOLERANCE_PX
-
-
-def test_find_float_detects_desaturated_feather():
-	place = find_float(DESATURATED_FIXTURE_PATH)
-
-	assert place is not None
-	x, y = place
-	assert abs(x - DESATURATED_EXPECTED_X) <= TOLERANCE_PX
-	assert abs(y - DESATURATED_EXPECTED_Y) <= TOLERANCE_PX
-
-
-def test_find_float_detects_backlit_float():
-	place = find_float(BACKLIT_FIXTURE_PATH)
-
-	assert place is not None
-	x, y = place
-	assert abs(x - BACKLIT_EXPECTED_X) <= TOLERANCE_PX
-	assert abs(y - BACKLIT_EXPECTED_Y) <= TOLERANCE_PX
-
-
-def test_find_float_detects_float_on_calm_canal_water():
-	place = find_float(STORMWIND_FIXTURE_PATH)
-
-	assert place is not None
-	x, y = place
-	assert abs(x - STORMWIND_EXPECTED_X) <= TOLERANCE_PX
-	assert abs(y - STORMWIND_EXPECTED_Y) <= TOLERANCE_PX
-	assert abs(x - STORMWIND_FALSE_POSITIVE_X) > TOLERANCE_PX or abs(y - STORMWIND_FALSE_POSITIVE_Y) > TOLERANCE_PX
-
-
-def test_find_float_detects_float_in_hue_shifted_dusk_water():
-	place = find_float(DUSK_FIXTURE_PATH)
-
-	assert place is not None
-	x, y = place
-	assert abs(x - DUSK_EXPECTED_X) <= DUSK_TOLERANCE_PX
-	assert abs(y - DUSK_EXPECTED_Y) <= DUSK_TOLERANCE_PX
-
-
-def test_find_float_detects_float_in_extremely_saturated_water():
-	place = find_float(EXTREME_DUSK_FIXTURE_PATH)
-
-	assert place is not None
-	x, y = place
-	assert abs(x - EXTREME_DUSK_EXPECTED_X) <= EXTREME_DUSK_TOLERANCE_PX
-	assert abs(y - EXTREME_DUSK_EXPECTED_Y) <= EXTREME_DUSK_TOLERANCE_PX
-
-
-def test_find_float_detects_float_in_sunset_tinted_water():
-	place = find_float(SUNSET_FIXTURE_PATH)
-
-	assert place is not None
-	x, y = place
-	assert abs(x - SUNSET_EXPECTED_X) <= TOLERANCE_PX
-	assert abs(y - SUNSET_EXPECTED_Y) <= TOLERANCE_PX
-
-
-def test_find_float_detects_float_when_water_saturation_clips_the_color_gate():
-	place = find_float(CLIPPED_SATURATION_FIXTURE_PATH)
-
-	assert place is not None
-	x, y = place
-	assert abs(x - CLIPPED_SATURATION_EXPECTED_X) <= TOLERANCE_PX
-	assert abs(y - CLIPPED_SATURATION_EXPECTED_Y) <= TOLERANCE_PX
-
-
-def test_find_float_detects_dim_float_in_dark_night_scene():
-	place = find_float(DIM_NIGHT_FIXTURE_PATH)
-
-	assert place is not None
-	x, y = place
-	assert abs(x - DIM_NIGHT_EXPECTED_X) <= DIM_NIGHT_TOLERANCE_PX
-	assert abs(y - DIM_NIGHT_EXPECTED_Y) <= DIM_NIGHT_TOLERANCE_PX
-
-
-def test_find_float_ignores_default_ui_player_frames():
-	place = find_float(UI_FRAME_FIXTURE_PATH)
-
-	assert place is not None
-	x, y = place
-	assert abs(x - UI_FRAME_EXPECTED_X) <= UI_FRAME_TOLERANCE_PX
-	assert abs(y - UI_FRAME_EXPECTED_Y) <= UI_FRAME_TOLERANCE_PX
-	# also explicitly guard against regressing back onto either UI frame
-	assert abs(x - UI_FRAME_LEFT_FALSE_POSITIVE_X) > TOLERANCE_PX or abs(y - UI_FRAME_LEFT_FALSE_POSITIVE_Y) > TOLERANCE_PX
-	assert abs(x - UI_FRAME_RIGHT_FALSE_POSITIVE_X) > TOLERANCE_PX or abs(y - UI_FRAME_RIGHT_FALSE_POSITIVE_Y) > TOLERANCE_PX
-
-
-def test_find_float_detects_float_when_whole_scene_is_too_desaturated_for_the_gate():
-	place = find_float(UNIFORM_DESAT_FIXTURE_PATH)
-
-	assert place is not None
-	x, y = place
-	assert abs(x - UNIFORM_DESAT_EXPECTED_X) <= UNIFORM_DESAT_TOLERANCE_PX
-	assert abs(y - UNIFORM_DESAT_EXPECTED_Y) <= UNIFORM_DESAT_TOLERANCE_PX
-
-
-def test_find_float_detects_base_color_of_a_dark_night_float():
-	place = find_float(DIM_NIGHT_BASE_FIXTURE_PATH)
-
-	assert place is not None
-	x, y = place
-	assert abs(x - DIM_NIGHT_BASE_EXPECTED_X) <= TOLERANCE_PX
-	assert abs(y - DIM_NIGHT_BASE_EXPECTED_Y) <= TOLERANCE_PX
-
-
-def test_find_float_detects_float_when_gate_rejects_it_but_other_pixels_keep_it_active():
-	place = find_float(WARM_DUSK_GATE_MISS_FIXTURE_PATH)
-
-	assert place is not None
-	x, y = place
-	assert abs(x - WARM_DUSK_GATE_MISS_EXPECTED_X) <= TOLERANCE_PX
-	assert abs(y - WARM_DUSK_GATE_MISS_EXPECTED_Y) <= TOLERANCE_PX
-
-
-def test_find_float_ignores_scattered_noise_when_water_matches_base_color():
-	place = find_float(CLICK_NOISE_FIXTURE_PATH)
-
-	assert place is not None
-	x, y = place
-	assert abs(x - CLICK_NOISE_EXPECTED_X) <= CLICK_NOISE_TOLERANCE_PX
-	assert abs(y - CLICK_NOISE_EXPECTED_Y) <= CLICK_NOISE_TOLERANCE_PX
+	assert abs(x - expected[0]) <= tolerance, why
+	assert abs(y - expected[1]) <= tolerance, why
+	for false_x, false_y in forbidden:
+		assert abs(x - false_x) > TOLERANCE_PX or abs(y - false_y) > TOLERANCE_PX, why
 
 
 def test_adaptive_color_mask_does_not_drop_large_blobs_itself():
@@ -407,3 +151,100 @@ def test_find_float_still_finds_the_same_match_outside_ui_exclude_regions(tmp_pa
 	"""Control for the test above: the identical pasted float, moved out of every UI
 	region, is found."""
 	assert find_float(_frame_with_float_at(1280, 800, tmp_path)) is not None
+
+
+def test_find_float_finds_a_float_low_in_the_search_band(tmp_path):
+	"""Real casts have landed as low as 77% of the window's height; the band's lower edge
+	must stay padded past that (FLOAT_SEARCH_Y_RANGE)."""
+	assert find_float(_frame_with_float_at(1280, int(1410 * 0.77), tmp_path)) is not None
+
+
+def test_find_float_ignores_a_match_up_near_the_horizon(tmp_path):
+	"""A perfect template match well above where a nearby cast can land (where a distant
+	ship would sit) must be outside the search band."""
+	assert find_float(_frame_with_float_at(1280, int(1410 * 0.30), tmp_path)) is None
+
+
+def _water_hsv(h=800, w=1400, saturation=30, value=150):
+	"""Uniform water-like HSV canvas, sized so a few thousand saturated pixels stay under
+	the 99.5th-percentile baseline's own 0.5% slice (see FLOAT_SATURATION_BASELINE_PERCENTILE)."""
+	hsv = np.zeros((h, w, 3), dtype=np.uint8)
+	hsv[:, :, 0] = 100
+	hsv[:, :, 1] = saturation
+	hsv[:, :, 2] = value
+	return hsv
+
+
+def test_adaptive_color_mask_admits_a_dim_but_saturated_float():
+	"""A dark-night float's feather renders saturated but dim (value 39-61) against water
+	that never exceeds ~46 - it must clear the gate, i.e. FLOAT_MIN_VALUE stays low."""
+	hsv = _water_hsv(saturation=30, value=30)
+	hsv[300:310, 400:440, 1] = 200
+	hsv[300:310, 400:440, 2] = 45
+
+	mask = _adaptive_color_mask(hsv)
+
+	assert int((mask[300:310, 400:440] > 0).sum()) == 40 * 10
+
+
+def test_adaptive_color_mask_baselines_off_the_top_of_a_saturation_plateau():
+	"""A very saturated sea plateaus well above its median right up through its own 99th
+	percentile before the float's outliers jump above it. The baseline must sit on that
+	plateau (99.5th percentile), or the plateau itself passes the gate as 'float-colored'."""
+	hsv = _water_hsv(saturation=30)
+	hsv[:70, :, 1] = 200             # 70/800 = 8.75% of rows: the plateau, all "just water"
+	hsv[300:310, 400:440, 1] = 250   # the float's own outlier pixels, well above it
+
+	mask = _adaptive_color_mask(hsv)
+
+	assert int((mask[:70] > 0).sum()) == 0
+	assert int((mask[300:310, 400:440] > 0).sum()) == 40 * 10
+
+
+def test_color_mask_drops_a_large_saturated_structure_but_keeps_the_float():
+	"""A dock/hull-sized saturated blob (over FLOAT_MAX_BLOB_SIZE) must not survive as float
+	color evidence, while a float-sized blob elsewhere in the same band does. Checked at the
+	mask level: on a whole frame, the ungated grayscale fallback would rescue the result
+	either way, hiding a broken blob filter."""
+	hsv = _water_hsv()
+	hsv[100:110, 50:300, 1] = 200    # 250x10 structure
+	hsv[400:410, 800:840, 1] = 200   # 40x10 float-sized patch
+	bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+	mask = _build_color_mask(bgr, [], (0, 0, hsv.shape[1], hsv.shape[0]))
+
+	assert int((mask[100:110, 50:300] > 0).sum()) == 0
+	assert int((mask[400:410, 800:840] > 0).sum()) > 0
+
+
+@pytest.mark.parametrize('x_ratio', [0.28, 0.72])
+def test_find_float_finds_a_float_near_the_search_bands_side_edges(tmp_path, x_ratio):
+	"""Real casts land off-center; the band's horizontal range (FLOAT_SEARCH_X_RANGE) must
+	stay wide enough to keep them."""
+	assert find_float(_frame_with_float_at(int(2560 * x_ratio), int(1410 * 0.55), tmp_path)) is not None
+
+
+@pytest.mark.parametrize('x_ratio', [0.15, 0.85])
+def test_find_float_ignores_a_match_outside_the_search_band_sides(tmp_path, x_ratio):
+	assert find_float(_frame_with_float_at(int(2560 * x_ratio), int(1410 * 0.55), tmp_path)) is None
+
+
+def _match(score):
+	return _Match(score, (0, 0), (10, 10), 'template.png')
+
+
+def test_pick_match_rejects_a_score_in_the_gap_below_the_real_float_floor():
+	"""Confirmed-real matches score 0.439+; a real miss scored 0.330 (a stray water-texture
+	match). Both the gated and the ungated candidate at that level must read as not found,
+	not get clicked and cost a whole listen() timeout."""
+	assert _pick_match(_match(0.33), _match(0.33)) is None
+	assert _pick_match(_match(0.44), _match(0.44)) is not None
+
+
+def test_pick_match_falls_back_to_ungated_only_when_the_gated_one_is_too_weak():
+	gated_weak, raw_strong = _match(0.20), _match(0.60)
+	assert _pick_match(gated_weak, raw_strong) is raw_strong
+	# a gated candidate that clears the threshold wins even if the ungated one scores higher
+	gated_ok, raw_higher = _match(0.50), _match(0.90)
+	assert _pick_match(gated_ok, raw_higher) is gated_ok
+	assert _pick_match(None, None) is None
