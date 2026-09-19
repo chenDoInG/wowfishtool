@@ -33,10 +33,12 @@ FLOAT_TEMPLATE_GLOB = 'var/fishing_float_*.png'
 # stay a miss scored 0.33. A weak match becomes "not found" (the caller retries) rather than a wasted click.
 FLOAT_MATCH_THRESHOLD = 0.35
 
-# Search band, as fractions of the window. Real detections fell between 45% and 77% of the height, below the
+# Search band, as fractions of the window. Real detections fell between 39% and 77% of the height, below the
 # horizon and above the character; padded, because a float cropped out of the band cannot be recovered later.
+# The top was 0.38 until a far cast landed at 38.6%, its upper half cut off (0.24-0.33, not found); 0.34 finds it
+# (0.79), while 0.30 already lets a warm dusk's scenery win (warm_dusk_gate_miss).
 FLOAT_SEARCH_X_RANGE = (0.25, 0.75)
-FLOAT_SEARCH_Y_RANGE = (0.38, 0.80)
+FLOAT_SEARCH_Y_RANGE = (0.34, 0.80)
 
 # Screen elements inside the band that are never the float: the player frame (bottom-left) and the copy WoW's
 # default modern layout adds (bottom-right). Fractions of the window, measured on a 2560x1410 capture, padded.
@@ -57,7 +59,7 @@ FLOAT_MAX_BLOB_SIZE = 200    # a connected evidence blob wider or taller than th
 # Evidence 2, the base's own color: one narrow range per lighting (a wide one bleeds into water).
 # The dusk-to-night green base was measured on 68 real floats (H 52-94, S 27-90, V 19-57).
 FLOAT_BASE_COLOR_RANGES = (
-	((10, 80, 100), (35, 255, 255)),   # daylight warm tan/yellow
+	((10, 45, 100), (35, 255, 255)),   # daylight warm tan/yellow; a night-lit base is paler (S 44-113)
 	((40, 30, 120), (75, 90, 255)),    # dusk/night-tinted, desaturated
 	((10, 15, 25), (35, 140, 110)),    # the daylight hue dimmed by night lighting
 	((35, 25, 25), (95, 120, 200)),    # dark, desaturated green

@@ -50,6 +50,9 @@ FLOAT_CASES = [
 	('daytime_waves_float.png', (1155, 932), 30, [(887, 607)],
 	 'daytime sea whose water is as saturated as the cliffs (gate blind, threshold 199) and whose hue is the base range: '
 	 'color evidence pointed at a cliff (0.41) while the real float scored 0.55-0.59 on three templates that agree on it'),
+	('night_water_float_at_band_top.png', (1167, 569), 10, [],
+	 'night water, a far cast landing at 38% of the height: the old band edge cut off the top of the feather (0.37 here, '
+	 'not found in another cast at 0.24-0.33). The base is also paler than the daylight range assumed (S 44-113)'),
 	('dim_night_base_color.png', (1355.61, 695.46), TOLERANCE_PX, [],
 	 'dark night base: hue inside the daylight range but S/V far below its floors, so '
 	 'every cast fell back to the geometric center; needs the dim base color range'),
@@ -716,3 +719,17 @@ def test_the_click_finds_the_base_where_one_range_floods_with_the_water():
 
 	assert detection.on_base_color
 	assert math.hypot(detection.point[0] - 1155, detection.point[1] - 932) < 10
+
+
+def test_a_float_at_the_top_of_the_band_is_matched_whole_not_half_cut_off():
+	"""The band starts at 34% of the height: a far cast lands just below 38%, where the old edge cut the feather off."""
+	detection = find_float_detailed(os.path.join(FIXTURE_DIR, 'night_water_float_at_band_top.png'))
+
+	assert detection.score > 0.6   # 0.77 with the whole float in the band, 0.37 with the top cut off
+
+
+def test_a_pale_night_base_is_still_found_by_color():
+	"""A night-lit base has a saturation of 44-113; the daylight range must reach that low or the click falls back."""
+	detection = find_float_detailed(os.path.join(FIXTURE_DIR, 'night_water_float_at_band_top.png'))
+
+	assert detection.on_base_color
