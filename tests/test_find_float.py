@@ -11,8 +11,9 @@ import cv2
 import numpy as np
 import pytest
 
-from float_detector import (FLOAT_MAX_BLOB_SIZE, FLOAT_MIN_TEXTURE, _adaptive_color_mask, _box_texture, _build_color_mask,
-								_drop_large_blobs, _float_click_point, _Match, _normalization_scale, _pick_match, find_float)
+from float_detector import (EVIDENCE_BASE, EVIDENCE_GATE, FLOAT_MAX_BLOB_SIZE, FLOAT_MIN_TEXTURE, Candidate, _adaptive_color_mask,
+								_base_click_point, _box_texture, _build_color_mask, _decide, _drop_large_blobs, _normalization_scale,
+								find_float, find_float_detailed)
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), 'fixtures')
 TOLERANCE_PX = 20
@@ -33,7 +34,7 @@ FLOAT_CASES = [
 	 'deep-blue dusk sea shifts the float hues around the wheel - needs the adaptive '
 	 'saturation gate; the base hue is shifted too, so the click falls back to '
 	 'FALLBACK_VERTICAL_BIAS, hence the tighter tolerance'),
-	('sunset_purple_water.png', (1077, 434), TOLERANCE_PX, [],
+	('sunset_purple_water.png', (1077, 434), 10, [],
 	 'pink/purple sunset water; no template matched until fishing_float_6.png was added'),
 	('saturation_ceiling_clip.png', (914, 615), TOLERANCE_PX, [],
 	 'water so saturated the gate threshold exceeds 255 - the gate passes nothing, so '
@@ -115,9 +116,8 @@ def test_find_float_keeps_a_float_touching_a_ui_frame_blob():
 def test_find_float_rejects_colorless_frame(tmp_path):
 	# A flat grey frame - standing in for WoW's disconnect/login/character-select
 	# screens, which have no saturated pixels at all. The gate finds nothing here, so
-	# find_float() falls back to the ungated grayscale score (see _pick_match()) - which
-	# must itself stay under FLOAT_MATCH_THRESHOLD on plain grey, or this frame would
-	# read as a float.
+	# find_float() has no color evidence to work with (see _decide()) and the frame
+	# must read as not found, not as a float.
 	blank_frame = np.full((1050, 1893, 3), 120, dtype=np.uint8)
 	frame_path = tmp_path / 'colorless_frame.png'
 	cv2.imwrite(str(frame_path), blank_frame)
@@ -207,9 +207,8 @@ def test_color_mask_drops_a_large_saturated_structure_but_keeps_the_float():
 	hsv = _water_hsv()
 	hsv[100:110, 50:300, 1] = 200    # 250x10 structure
 	hsv[400:410, 800:840, 1] = 200   # 40x10 float-sized patch
-	bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
 
-	mask = _build_color_mask(bgr, [], (0, 0, hsv.shape[1], hsv.shape[0]))
+	mask = _build_color_mask(hsv, [])
 
 	assert int((mask[100:110, 50:300] > 0).sum()) == 0
 	assert int((mask[400:410, 800:840] > 0).sum()) > 0
@@ -227,25 +226,26 @@ def test_find_float_ignores_a_match_outside_the_search_band_sides(tmp_path, x_ra
 	assert find_float(_frame_with_float_at(int(2560 * x_ratio), int(1410 * 0.55), tmp_path)) is None
 
 
-def _match(score):
-	return _Match(score, (0, 0), (10, 10), 'template.png')
+def _candidate(score, evidence):
+	return Candidate(score, (0, 0), (10, 10), 'template.png', evidence)
 
 
-def test_pick_match_rejects_a_score_in_the_gap_below_the_real_float_floor():
-	"""Confirmed-real matches score 0.439+; a real miss scored 0.330 (a stray water-texture
-	match). Both the gated and the ungated candidate at that level must read as not found,
-	not get clicked and cost a whole listen() timeout."""
-	assert _pick_match(_match(0.33), _match(0.33)) is None
-	assert _pick_match(_match(0.44), _match(0.44)) is not None
+def test_decide_rejects_a_score_in_the_gap_below_the_real_float_floor():
+	"""Confirmed-real matches score 0.375+ (0.30 for a float still fading in); a real miss scored 0.330 (a stray
+	water-texture match). Both kinds of evidence at that level must read as not found, not get clicked and
+	cost a whole listen() timeout."""
+	assert _decide({EVIDENCE_GATE: _candidate(0.33, EVIDENCE_GATE), EVIDENCE_BASE: _candidate(0.33, EVIDENCE_BASE)}) is None
+	assert _decide({EVIDENCE_GATE: _candidate(0.44, EVIDENCE_GATE), EVIDENCE_BASE: _candidate(0.44, EVIDENCE_BASE)}) is not None
 
 
-def test_pick_match_falls_back_to_ungated_only_when_the_gated_one_is_too_weak():
-	gated_weak, raw_strong = _match(0.20), _match(0.60)
-	assert _pick_match(gated_weak, raw_strong) is raw_strong
-	# a gated candidate that clears the threshold wins even if the ungated one scores higher
-	gated_ok, raw_higher = _match(0.50), _match(0.90)
-	assert _pick_match(gated_ok, raw_higher) is gated_ok
-	assert _pick_match(None, None) is None
+def test_decide_falls_back_to_base_colored_windows_only_when_the_gate_is_too_weak():
+	gate_weak, base_strong = _candidate(0.20, EVIDENCE_GATE), _candidate(0.60, EVIDENCE_BASE)
+	assert _decide({EVIDENCE_GATE: gate_weak, EVIDENCE_BASE: base_strong}) is base_strong
+	# a gated candidate that clears the threshold wins even if the base-colored one scores higher
+	gate_ok, base_higher = _candidate(0.50, EVIDENCE_GATE), _candidate(0.90, EVIDENCE_BASE)
+	assert _decide({EVIDENCE_GATE: gate_ok, EVIDENCE_BASE: base_higher}) is gate_ok
+	assert _decide({EVIDENCE_GATE: None, EVIDENCE_BASE: None}) is None
+	assert _decide({}) is None
 
 
 # backlit_float.png's UI regions were blacked out in the original capture. A synthetic
@@ -380,9 +380,8 @@ def test_debug_lists_the_blobs_the_gate_dropped(capsys, monkeypatch):
 	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
 	hsv = _water_hsv()
 	hsv[100:110, 50:300, 1] = 200   # 250x10 structure, over FLOAT_MAX_BLOB_SIZE
-	bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
 
-	_build_color_mask(bgr, [], (0, 0, hsv.shape[1], hsv.shape[0]))
+	_build_color_mask(hsv, [])
 
 	assert 'after dropping 1 blob(s) over 200px [(250, 10)]' in '\n'.join(_debug_lines(capsys))
 
@@ -466,18 +465,18 @@ def test_debug_says_when_it_matches_on_a_resized_copy(capsys, monkeypatch):
 
 
 def _hsv_patch(h, s, v, size=12, canvas=(60, 80), background=(115, 60, 40)):
-	"""A canvas of `background` HSV with a size x size patch of (h, s, v) in the middle, as BGR."""
+	"""A canvas of `background` HSV with a size x size patch of (h, s, v) in the middle."""
 	hsv = np.zeros((*canvas, 3), dtype=np.uint8)
 	hsv[:, :] = background
 	top, left = (canvas[0] - size) // 2, (canvas[1] - size) // 2
 	hsv[top:top + size, left:left + size] = (h, s, v)
-	return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+	return hsv
 
 
 def test_click_point_finds_a_dark_desaturated_green_base():
 	"""The base measured on 68 real floats from a dusk-to-night session: H 52-94, S 27-90, V 19-57.
 	None of the older ranges reached it, so every cast fell back to the box-center click."""
-	point = _float_click_point(_hsv_patch(66, 46, 38))
+	point = _base_click_point(_hsv_patch(66, 46, 38))
 
 	assert point is not None
 	assert abs(point[0] - 40) <= 2 and abs(point[1] - 30) <= 2
@@ -485,7 +484,7 @@ def test_click_point_finds_a_dark_desaturated_green_base():
 
 def test_click_point_ignores_pale_blue_water_that_the_fallback_used_to_pick():
 	"""Regions where the fallback picked sky-reflection water instead of a float have hue 100-120."""
-	assert _float_click_point(_hsv_patch(110, 50, 200)) is None
+	assert _base_click_point(_hsv_patch(110, 50, 200)) is None
 
 
 def test_a_float_with_no_base_color_anywhere_is_not_found_on_shape_alone(capsys, monkeypatch, tmp_path):
@@ -512,3 +511,20 @@ def test_debug_reports_the_base_color_pixels_and_the_windows_that_have_it(capsys
 	lines = '\n'.join(_debug_lines(capsys))
 	assert 'using the shape match among base-colored windows' in lines
 	assert 'with base color ' in lines
+
+
+def test_find_float_detailed_says_which_evidence_decided(tmp_path):
+	"""The caller can tell a float backed by relative-saturation evidence from one that only the base color vouches for."""
+	gated = find_float_detailed(os.path.join(FIXTURE_DIR, 'backlit_float.png'))
+	base_colored = find_float_detailed(os.path.join(FIXTURE_DIR, 'small_float_on_pale_water.png'))
+
+	assert gated.confidence == EVIDENCE_GATE
+	assert base_colored.confidence == EVIDENCE_BASE and base_colored.on_base_color
+	assert base_colored.template.endswith('.png') and base_colored.score > 0.35
+
+
+def test_find_float_is_the_point_of_find_float_detailed():
+	path = os.path.join(FIXTURE_DIR, 'small_float_on_pale_water.png')
+
+	assert find_float(path) == find_float_detailed(path).point
+	assert find_float_detailed(os.path.join(FIXTURE_DIR, 'no_float_dark_water.png')) is None

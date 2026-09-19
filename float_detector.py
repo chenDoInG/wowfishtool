@@ -1,216 +1,134 @@
+"""Find the fishing float in a screenshot of the WoW window.
+
+The pipeline, in the order find_float_detailed() runs it:
+
+1. normalize   Resize the screenshot to a reference width when the window is much smaller or larger
+               than the ones the templates were cropped from, so the float has the templates' size.
+2. evidence    Two independent maps of "float-colored" pixels over the search band: pixels much more
+               saturated than this scene's water (works for any hue), and pixels inside the fixed
+               HSV ranges of the bobber's base (works when the water is too saturated for the first).
+3. candidates  Grayscale template correlation for every template. Windows on a screen element or
+               with no texture are excluded outright. For each kind of evidence, each template
+               contributes its best window among those the evidence supports.
+4. decide      The strongest kind of evidence whose best candidate clears FLOAT_MATCH_THRESHOLD wins.
+               Shape alone never decides: on water it scores 0.4-0.7 almost anywhere.
+5. click point The base's color centroid near the match, else the match's geometric center.
+
+Coordinates are reported in the original screenshot's pixels. The history behind each number is in
+the commit messages and README; the comments here say what a constant is for and what it was measured on.
+"""
 import glob
 import os
 import time
-from typing import NamedTuple, Optional
+from typing import Dict, NamedTuple, Optional
 
 import cv2
 import numpy as np
 
+# ------------------------------------------------------------------------------ configuration
+
 FLOAT_TEMPLATE_GLOB = 'var/fishing_float_*.png'
 
-# Every confirmed-real match logged so far has scored 0.439 or higher (even in the
-# hardest lighting fixtures). A real miss - a hazy scene where the color gate found zero
-# density at the float's own true position, so only a stray water-texture match survived
-# the gate at all - scored 0.330: comfortably below that floor. Sitting the threshold in
-# the gap between the two means a match this weak now gets treated like "not found"
-# (a quick retry) instead of confidently committing to a wrong location and then wasting
-# a full listen() timeout waiting for a bite that was never coming.
+# Lowest correlation that counts as a float. Confirmed real floats scored 0.30 (still fading in) to
+# 0.9; the real miss that must stay a miss scored 0.33. Deliberately in the gap: a weak match becomes
+# "not found" (the caller retries) instead of a click that wastes a whole bite timeout.
 FLOAT_MATCH_THRESHOLD = 0.35
 
-# The float always lands in the water close to the character, which - because a nearby
-# point on the water is lower in the view than a distant one - puts it in the lower part
-# of the window, well below the horizon and anything far off on it (a distant ship, say).
-# Restricting the search to this band keeps that class of thing, and repetitive
-# water-ripple texture elsewhere on screen, from out-scoring the real float. Every
-# confirmed-real detection logged so far has landed between 45% and 77% of the window's
-# height; a nearby ship is far more likely to sit above that than a closer cast is to
-# land below it, hence the lower bound sitting much closer to the observed range.
-#
-# The upper end of that range varies more than expected across different window/camera
-# setups - one real session consistently landed casts around 74-77%, well past the 72%
-# this used to stop at. That's not a color or shape problem at all: cropping the float
-# out of the search band before matching even starts means no amount of tuning the color
-# gate or templates can recover it, since the pixels just aren't in the region being
-# analyzed. Pad the upper bound well past every real detection logged so far instead of
-# exactly to it, so the next new camera setup doesn't clip the same way.
+# Where a cast lands, as fractions of the window. Every real detection so far fell between 45% and 77%
+# of the height, below the horizon (a distant ship) and above the character; the top and bottom edges are
+# padded past that because cropping the float out of the band cannot be recovered by any later stage.
 FLOAT_SEARCH_X_RANGE = (0.25, 0.75)
 FLOAT_SEARCH_Y_RANGE = (0.38, 0.80)
 
-# Player-frame clusters (portrait, name, health/mana bars) sit at fixed screen spots that
-# land inside the band above - and they're exactly the kind of thing the adaptive color
-# gate is meant to let through: a gold-bordered icon plus solid green/blue bars is
-# comfortably more saturated than any water. On a real capture, once a genuinely
-# dim/hard-to-see float got rejected by the color gate (see FLOAT_MIN_VALUE /
-# FLOAT_SATURATION_MARGIN above), one of these frames was the next-highest-scoring thing
-# around and won outright, confidently above FLOAT_MATCH_THRESHOLD - the bot would have
-# clicked a UI element instead of the float. A screen element should never be mistaken
-# for the float regardless of how the color gate happens to score elsewhere, so both are
-# excluded outright rather than left to compete:
-#   - the default always-on player frame, bottom-left, present in every capture
-#     regardless of Edit Mode layout;
-#   - WoW's current default "Modern" Edit Mode layout additionally plants a duplicate of
-#     that same cluster near the bottom-right.
-# Both measured off a real 2560x1410 capture; padded on every side since exact placement
-# can drift a little with a different resolution or UI scale.
+# Fixed screen elements inside the band that must never be taken for the float: the always-on player frame
+# (bottom-left) and the duplicate WoW's default "Modern" layout adds (bottom-right). Fractions of the window,
+# measured on a 2560x1410 capture and padded.
 UI_EXCLUDE_REGIONS = (
 	((0.26, 0.36), (0.72, 0.80)),
 	((0.62, 0.76), (0.71, 0.83)),
 )
 
-# Water/shoreline edges, ships, and even the water itself can carry a strong, fixed
-# hue - WoW tints its lighting per-zone/time-of-day (grey overcast, blue dusk, warm
-# afternoon, ...), and that tint shifts wherever a fixed HSV hue/saturation range
-# expects to find the float's colors to be, breaking any one fixed range sooner or
-# later. What holds regardless of tint: the float's bobber+feather are always far more
-# saturated than the water immediately around them, even when that water is itself
-# fairly saturated (e.g. a deep blue dusk sea). So instead of a fixed color range,
-# measure how saturated *this* scene's water actually is and require a pixel to clear
-# that baseline by a margin to count as part of the float - adapts to the scene
-# instead of needing yet another hardcoded range for the next new lighting condition.
-# The baseline itself needs to sit close to the water's actual ceiling, not just above
-# its typical/median pixel: a very saturated sea can plateau hard right up to its own
-# 99th-plus percentile (still just water) before jumping sharply at the float's outlier
-# pixels, so a lower percentile like 90 sits on that plateau and leaves too thin a
-# margin to separate the two in that case.
+# Evidence 1, relative saturation: a pixel counts when it is more saturated than the scene's water by a margin,
+# whatever the hue. The baseline is the 99.5th percentile (a saturated sea plateaus up to its 99th, so a lower
+# percentile leaves no headroom); the UI frames are left out of it because two of them (~2% of the band) would
+# drag it up to their own saturation and blind the gate.
 FLOAT_SATURATION_BASELINE_PERCENTILE = 99.5
 FLOAT_SATURATION_MARGIN = 20
+FLOAT_MIN_VALUE = 30        # near-black pixels have unstable saturation; the dimmest real float pixel seen was 39
+FLOAT_MIN_COLOR_PIXELS = 15  # evidence pixels a window needs before that evidence supports it (both kinds)
+FLOAT_MAX_BLOB_SIZE = 200    # a connected evidence blob wider or taller than this is scenery (a dock, a hull), not a float
 
-# Guards against near-black pixels, whose saturation is numerically unstable (a tiny
-# absolute BGR difference swings the max-min/max ratio wildly), registering as
-# float-colored noise. Used to sit at 60, which was fine everywhere it got tested until
-# a real dark-night scene: the float itself renders dim there, its own clearly-saturated
-# feather pixels landing at value 39-61 - mostly *below* the old floor - while the
-# water around it never exceeds ~46 even at its own 99th percentile. So brightness can't
-# discriminate float from water in that scene at all (only saturation still can); the
-# floor's remaining job is purely rejecting actual near-black noise, which this scene's
-# water sits comfortably above (10th percentile 30). 30 admits the dimmest confirmed-real
-# float pixel logged so far with a 9-unit margin and was re-verified against every other
-# fixture logged before it.
-FLOAT_MIN_VALUE = 30
-FLOAT_MIN_COLOR_PIXELS = 15
-
-# A big saturated structure - a dock, a ship's hull - can clear the margin above too,
-# since it's a real, consistently-colored object rather than water noise. What it
-# never has is the float's small footprint: real detections have topped out around a
-# 46x14px blob, while a dock spans hundreds of pixels. Drop any connected blob of
-# "float-colored" pixels bigger than this in either dimension before gating on density.
-FLOAT_MAX_BLOB_SIZE = 200
-
-# The adaptive check above answers "is the float here at all" and is deliberately
-# hue-agnostic, but that also means it usually keys on the feather (its colors read as
-# more saturated than the base's yellow/tan against most water) rather than the base -
-# no good for clicking. The base's actual hue range is narrower and more predictable
-# than "whatever is more saturated than the water", so click positioning still uses it
-# directly; on the rare scene where none of these ranges find enough of it, the caller
-# falls back to the matched window's geometric center rather than failing outright.
-#
-# More than one range exists because ambient lighting tints the base's color along with
-# everything else - a dusk/night zone can shift it from its usual warm tan (hue ~10-35,
-# strongly saturated) to a desaturated yellow-green (hue ~40-75, only weakly saturated).
-# Each range is kept narrow and scene-specific rather than widening one range to cover
-# both, since a wide range risks bleeding into water that happens to sit in the gap
-# between them in some other scene (e.g. one daylight fixture's water itself reads at
-# roughly hue 47 - right where a single, wider range would have to pass through).
+# Evidence 2, the base's own color. One range per lighting; each is kept narrow because a wide one bleeds into water.
+# The dusk-to-night green base was measured on 68 real floats (H 52-94, S 27-90, V 19-57): no other range reaches it.
 FLOAT_BASE_COLOR_RANGES = (
-	((10, 80, 100), (35, 255, 255)),   # normal daylight warm tan/yellow base
-	((40, 30, 120), (75, 90, 255)),    # dusk/night-tinted, desaturated base
-	((10, 15, 25), (35, 140, 110)),    # same warm hue as the daylight base, but dark - a
-	# real dark-night capture measured its base at hue ~15-21 (squarely inside the
-	# daylight range above) yet saturation/value only 25-131/34-106 - both well under
-	# that range's 80/100 floors, so every cast in that session fell back to the
-	# geometric-center click point instead of a real color match, even though the float
-	# was clearly visible. Same hue window as the daylight range (this is that same base
-	# color, just dimmed by night lighting, not a different tint), with S/V floors
-	# lowered to admit it.
-	((35, 25, 25), (95, 120, 200)),    # dark, desaturated GREEN base: measured on 68 real floats from a dusk-to-night
-	# session (base pixels H 52-94, S 27-90, V 19-57) - none of the ranges above came near it (hue 40-75 needs V >= 120;
-	# the warm ones sit at hue 10-35), so all 81 casts in that session fell back to the box-center click. This range found
-	# a base blob (>= FLOAT_MIN_BASE_BLOB_AREA px) in 66 of those 68 real-float regions and in 0 of 7 regions where the
-	# fallback had picked pale sky-reflection water instead of a float (their hue is 100-120).
+	((10, 80, 100), (35, 255, 255)),   # daylight warm tan/yellow
+	((40, 30, 120), (75, 90, 255)),    # dusk/night-tinted, desaturated
+	((10, 15, 25), (35, 140, 110)),    # the daylight hue dimmed by night lighting
+	((35, 25, 25), (95, 120, 200)),    # dark, desaturated green
 )
-# A warm-enough dusk sea can put the *water itself* inside the daylight base range above
-# over a wide, contiguous area - not just the float. _drop_large_blobs correctly strips
-# that giant float+water blob out (its bounding box clears FLOAT_MAX_BLOB_SIZE), but what
-# survives is then just scattered, disconnected leftover flecks that happen to also fall
-# in range elsewhere in the padded region - real noise, unrelated to the float - which can
-# still sum to a plausible-looking total across enough of them and produce a confident-
-# looking but wrong centroid, real duller (2026-09-18 live miss: base+water fused into one
-# 224x157 blob, correctly dropped; the leftover noise still summed to 68px across several
-# fragments, none bigger than 23px, and centroided ~85px from the float's real position).
-# Every confirmed-real detection logged so far has its single largest surviving connected
-# component at 39px or more (down to a mask that's just one 39px blob with nothing else);
-# the confirmed-noise case above topped out at 23px. Requiring the largest component alone
-# (not the sum across all of them) to clear a floor between those two sits away from both
-# without touching the sum-based centroid math real detections already rely on.
-FLOAT_MIN_BASE_BLOB_AREA = 30
+FLOAT_MIN_BASE_BLOB_AREA = 30        # the click point needs one solid base blob this big, not scattered flecks
 
-# How far beyond the matched template's own box to look for the base's color - see the
-# comment where this is used in find_float(). Only padding downward/sideways, never
-# upward: the base always sits at or below the matched box in every fixture that's
-# needed padding at all, and the float's own feather/bobber sit above the base within
-# the box already, so padding upward only ever risks reaching into whatever backdrop
-# happens to be above the float (the Stormwind fixture has a dock up there) without
-# ever helping find the base.
+# Grayscale windows flatter than this cannot be a float: featureless water still correlates at 0.6-0.7. Empty water
+# measured 0.2-4.1, real float windows 6.0 and up (faint, fading-in floats sit at the bottom of that range).
+FLOAT_MIN_TEXTURE = 6
+
+# Click point: look for the base in the match's box padded down and sideways (never up: the feather is there),
+# else click FALLBACK_VERTICAL_BIAS of the way down the box - the base sits below the feather that pulls the box's
+# center up. The bias was measured against two manually verified scenes.
 CLICK_SEARCH_PADDING_TOP_RATIO = 0
 CLICK_SEARCH_PADDING_BOTTOM_RATIO = 0.5
 CLICK_SEARCH_PADDING_X_RATIO = 0.3
-
-# Where the base sits vertically within the matched box, as a fraction of its height -
-# used only when _float_click_point() can't find the base's own color at all (a scene
-# where the base blends into the water too closely for any fixed range to separate, e.g.
-# max graphics quality rendering the same dusk tint far more strongly onto every object).
-# The two known scenes that fall back to this were both measured against their real,
-# manually-verified float position: the base sits at ~65% of the box's height, not 50% -
-# the feather it's attached to occupies the upper portion, pulling the box's own vertical
-# center up past the base. Horizontal centering is left alone since both scenes' real
-# position landed exactly on the box's horizontal center already.
 FALLBACK_VERTICAL_BIAS = 0.65
 
-# The grayscale-only fallback (see _pick_match) scores normalized correlation, which is
-# happy to hit 0.6-0.7 on a patch of nearly featureless dark water: with no float on screen
-# at all it still "found" one on real empty frames (0.697 and 0.599 on flat dark water; then,
-# on finely rippled dusk water, a match on the water or on a floating creature-name label).
-# Windows picked that way measured a grayscale standard deviation of 0.2-1.9 (flat water) and
-# 3.9-4.1 (fine ripples) - a first floor of 4 sat right on the second group and let 3 of 4 through.
-# Every real float window measured is far more textured: 7.5 and up across the fixtures for all
-# four template sizes (feather, bobber, line), 9.0 and up for the templates themselves. The floor
-# sits in the middle of that gap. Deliberately only a floor: it stops flat and finely rippled
-# water, not strongly textured water (moon glitter) that happens to correlate well.
-FLOAT_MIN_TEXTURE = 6
-
-# The templates are fixed-size crops of a float from a full-size game window (~2560 px wide, a few
-# from a 1893 px one), so they only match a float of about that apparent size. Shrink the WoW
-# window and the float shrinks with it: in a real 919x524 window it was ~25 px against templates of
-# 50-140 px, and 5 of 14 completed casts came back "not found" with the float plainly in the water.
-# Matching on a copy of the screenshot resized to FLOAT_REFERENCE_WIDTH found it in all 4 saved
-# frames, within ~6 px. Screenshots inside FLOAT_UNSCALED_WIDTH_RATIOS are left alone: the fixtures
-# resized to 0.3-0.6 and 1.5-2.0 x their size all match, and at 0.7-0.75 x an unscaled Stormwind canal
-# was 795 px off while a normalized one is 8 px off, hence the 0.8 lower bound (the 1893 px fixtures, ratio
-# 0.74, give the same answers either way). Results are always reported in the original screenshot's
-# pixels. A cap keeps a degenerate, tiny screenshot from being blown up into a huge image.
+# Templates are crops from ~2560 px wide windows, so they only match a float of about that apparent size. A screenshot
+# outside FLOAT_UNSCALED_WIDTH_RATIOS of the reference width is matched on a resized copy (a real 919 px window showed
+# the float at ~25 px against templates of 50-140 px). FLOAT_MAX_UPSCALE keeps a tiny screenshot from becoming huge.
 FLOAT_REFERENCE_WIDTH = 2556
 FLOAT_UNSCALED_WIDTH_RATIOS = (0.8, 1.4)
 FLOAT_MAX_UPSCALE = 4
 
-# Off by default so a normal run never touches disk for this - flip to True (fishing.py
-# does this for you when its own DEBUG_SNAPSHOTS is set, see there) to save an annotated
-# screenshot into DEBUG_SNAPSHOT_DIR any time the click point falls back to the matched
-# box's geometric center (see the comment where this is used in find_float()), for
-# reviewing after the fact instead of only when a bad catch happens to get noticed.
+# Debugging: trace lines for every step, and an annotated screenshot in DEBUG_SNAPSHOT_DIR whenever the click point falls
+# back to the box center. Off by default so a normal run prints and writes nothing extra.
 DEBUG_SNAPSHOTS = False
 DEBUG_SNAPSHOT_DIR = 'debug'   # kept out of var/, which holds the bot's real runtime data
 
+# ------------------------------------------------------------------------------ result types
+
+# The kinds of color evidence, strongest first. A window is "supported" by a kind when it holds at least
+# FLOAT_MIN_COLOR_PIXELS pixels of it.
+EVIDENCE_GATE = 'color-gated'
+EVIDENCE_BASE = 'base-colored'
+EVIDENCE_PRIORITY = (EVIDENCE_GATE, EVIDENCE_BASE)
+
+
+class Candidate(NamedTuple):
+	score: float
+	loc: tuple       # top-left, in search-band coordinates
+	size: tuple      # (width, height) of the template
+	template: str
+	evidence: str    # the kind of color evidence backing the window
+
+
+class Detection(NamedTuple):
+	point: tuple        # (x, y) to click, in the screenshot's own pixels
+	confidence: str     # the evidence that decided: EVIDENCE_GATE (strong) or EVIDENCE_BASE
+	score: float
+	template: str
+	on_base_color: bool  # the click point is the base's color centroid, not the match's geometric center
+
+
+# ------------------------------------------------------------------------------ helpers
 
 def _debug(message):
-	"""Trace line for one step of find_float(), printed only while DEBUG_SNAPSHOTS is on. Callers
-	that would do real work just to build the message check DEBUG_SNAPSHOTS first."""
+	"""Trace line for one step, printed only while DEBUG_SNAPSHOTS is on. Callers that would do real work
+	just to build the message check DEBUG_SNAPSHOTS first."""
 	if DEBUG_SNAPSHOTS:
 		print('[float] ' + message)
 
 
 def _box_texture(gray: np.ndarray, window_size):
-	"""Per-pixel grayscale standard deviation of the window_size box anchored at that pixel's
-	top-left, i.e. texture[y, x] covers the same box matchTemplate's result[y, x] scores."""
+	"""Per-pixel grayscale standard deviation of the window_size box anchored at that pixel's top-left,
+	i.e. texture[y, x] covers the same box matchTemplate's result[y, x] scores."""
 	g = gray.astype(np.float64)
 	mean = cv2.boxFilter(g, cv2.CV_64F, window_size, anchor=(0, 0), borderType=cv2.BORDER_REFLECT)
 	mean_of_squares = cv2.boxFilter(g * g, cv2.CV_64F, window_size, anchor=(0, 0), borderType=cv2.BORDER_REFLECT)
@@ -218,18 +136,15 @@ def _box_texture(gray: np.ndarray, window_size):
 
 
 def _box_density(mask: np.ndarray, window_size):
-	"""Per-pixel count of nonzero `mask` pixels in a window_size box anchored at that
-	pixel's top-left, i.e. density[y, x] covers the same box matchTemplate's
-	result[y, x] scores."""
+	"""Per-pixel count of nonzero `mask` pixels in the window_size box anchored at that pixel's top-left."""
 	# mask pixels are 0 or 255, so the unnormalized box sum is 255x the actual pixel count
 	density = cv2.boxFilter(mask, cv2.CV_32F, window_size, normalize=False, anchor=(0, 0), borderType=cv2.BORDER_CONSTANT)
 	return density / 255.0
 
 
 def _drop_small_blobs_stats(mask: np.ndarray, max_size: int):
-	"""(cleaned, largest_area): `mask` with connected components wider or taller than
-	`max_size` zeroed out, plus the pixel area of the biggest component that survived
-	(0 if none did)."""
+	"""(cleaned, largest_area): `mask` without the connected components wider or taller than `max_size`,
+	plus the pixel area of the biggest component that survived (0 if none did)."""
 	_, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
 	keep = (stats[:, cv2.CC_STAT_WIDTH] <= max_size) & (stats[:, cv2.CC_STAT_HEIGHT] <= max_size)
 	keep[0] = False   # label 0 is the background
@@ -238,27 +153,66 @@ def _drop_small_blobs_stats(mask: np.ndarray, max_size: int):
 
 
 def _drop_large_blobs(mask: np.ndarray, max_size: int):
-	"""Zero out connected components of `mask` wider or taller than `max_size` - real
-	structures (a dock, a ship's hull) rather than the float's small bobber+feather."""
+	"""Zero out connected components wider or taller than `max_size` - structures, not the float's small blob."""
 	return _drop_small_blobs_stats(mask, max_size)[0]
 
 
+def _blank_ui(mask: np.ndarray, ui_boxes):
+	"""Zero the player-frame boxes of a band-sized mask: their saturated bars and gold border are colored
+	evidence in every sense except being a float."""
+	for bx0, by0, bx1, by1 in ui_boxes:
+		mask[by0:by1, bx0:bx1] = 0
+
+
+def _search_bounds(w: int, h: int):
+	"""(x0, y0, x1, y1) of the search band in full-screenshot pixel coordinates."""
+	return (int(w * FLOAT_SEARCH_X_RANGE[0]), int(h * FLOAT_SEARCH_Y_RANGE[0]),
+			int(w * FLOAT_SEARCH_X_RANGE[1]), int(h * FLOAT_SEARCH_Y_RANGE[1]))
+
+
+def _ui_boxes(w: int, h: int, bounds):
+	"""UI_EXCLUDE_REGIONS as (x0, y0, x1, y1) boxes in search-band coordinates, clipped to the band."""
+	search_x0, search_y0, search_x1, search_y1 = bounds
+	boxes = []
+	for (x_range, y_range) in UI_EXCLUDE_REGIONS:
+		x0 = max(0, int(w * x_range[0]) - search_x0)
+		x1 = min(search_x1 - search_x0, int(w * x_range[1]) - search_x0)
+		y0 = max(0, int(h * y_range[0]) - search_y0)
+		y1 = min(search_y1 - search_y0, int(h * y_range[1]) - search_y0)
+		if x1 > x0 and y1 > y0:
+			boxes.append((x0, y0, x1, y1))
+	return boxes
+
+
+def _normalization_scale(width: int):
+	"""Factor to resize a screenshot `width` px wide by before matching, or 1 to leave it alone."""
+	low, high = FLOAT_UNSCALED_WIDTH_RATIOS
+	ratio = width / FLOAT_REFERENCE_WIDTH
+	if low <= ratio <= high:
+		return 1
+	scale = FLOAT_REFERENCE_WIDTH / width
+	return scale if scale <= FLOAT_MAX_UPSCALE else 1
+
+
+def _load_templates():
+	"""[(path, grayscale image)] for every template on disk."""
+	templates = []
+	for path in sorted(glob.glob(FLOAT_TEMPLATE_GLOB)):
+		template = cv2.imread(path, 0)
+		if template is not None:
+			templates.append((path, template))
+	return templates
+
+
+# ------------------------------------------------------------------------------ 2. evidence
+
 def _adaptive_color_mask(hsv_region: np.ndarray, ui_boxes=()):
-	"""Pixels distinctly more saturated than this scene's own water, regardless of what
-	hue that happens to be - see the comment on FLOAT_SATURATION_MARGIN above.
+	"""Pixels distinctly more saturated than this scene's own water, whatever the hue.
 
-	The mask can legitimately come back empty - a colorless frame (disconnect/login/
-	character-select), or a scene whose water baseline + margin exceeds the HSV ceiling
-	(255) so nothing could ever pass. find_float() handles both the same way: a gate that
-	finds nothing gets no say (see _pick_match()).
-
-	`ui_boxes` (search-band coordinates) are left out of the water baseline: a player frame's
-	solid green/blue bars and gold border are far more saturated than any water, and left in,
-	two of them alone (~2% of the band) drag the 99.5th percentile up to their own level -
-	which raises the threshold past the float and turns the whole gate off.
-
-	Deliberately does NOT drop oversized blobs itself - see the comment in
-	_build_color_mask() where UI_EXCLUDE_REGIONS is blanked out before that happens."""
+	The mask can legitimately be empty - a colorless frame (login screen), or water so saturated that
+	baseline + margin exceeds the HSV ceiling - and then this evidence simply supports no window.
+	`ui_boxes` (band coordinates) are left out of the water baseline. Oversized blobs are NOT dropped here;
+	see _build_color_mask()."""
 	saturation = hsv_region[:, :, 1]
 	value = hsv_region[:, :, 2]
 	water_pixels = np.ones(saturation.shape, dtype=bool)
@@ -276,91 +230,12 @@ def _adaptive_color_mask(hsv_region: np.ndarray, ui_boxes=()):
 	return mask
 
 
-def _float_click_point(bgr_region: np.ndarray):
-	"""Pixel-coordinate centroid of the bobber base's color within `bgr_region`, or None
-	if there aren't enough matching pixels to trust it (caller falls back to the
-	geometric center in that case)."""
-	hsv = cv2.cvtColor(bgr_region, cv2.COLOR_BGR2HSV)
-	mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
-	for lo, hi in FLOAT_BASE_COLOR_RANGES:
-		mask |= cv2.inRange(hsv, lo, hi)
-	# The padded search region below can reach into a same-hued background structure
-	# (e.g. the wooden dock in the Stormwind fixture) - drop any blob too big to be the
-	# float's own base before centroiding, same rationale as _drop_large_blobs above.
-	mask, largest_component = _drop_small_blobs_stats(mask, FLOAT_MAX_BLOB_SIZE)
-	# A scene where the water shares the base's color range can leave behind scattered
-	# noise fragments that individually mean nothing - see FLOAT_MIN_BASE_BLOB_AREA. A
-	# real base is one solid blob, so require whichever single component is biggest to
-	# look like one, not the total across however many there are.
-	if largest_component < FLOAT_MIN_BASE_BLOB_AREA:
-		_debug('click: base color not found (largest blob ' + str(largest_component) + ' px, need ' + str(FLOAT_MIN_BASE_BLOB_AREA) + ')')
-		return None
-	moments = cv2.moments(mask, binaryImage=True)
-	_debug('click: base color found (largest blob ' + str(largest_component) + ' px, ' + str(int(moments['m00'])) + ' px total)')
-	return moments['m10'] / moments['m00'], moments['m01'] / moments['m00']
-
-
-def _save_fallback_debug_snapshot(img_bgr: np.ndarray, box_tl, box_size, click_point):
-	"""If DEBUG_SNAPSHOTS is on, save a copy of the screenshot (with the matched box and
-	click point drawn on it) into DEBUG_SNAPSHOT_DIR, so a click that had to fall back to
-	the geometric center (see find_float()) can be checked after the fact instead of only
-	when the user happens to notice a bad catch. No-op otherwise."""
-	if not DEBUG_SNAPSHOTS:
-		return
-	os.makedirs(DEBUG_SNAPSHOT_DIR, exist_ok=True)
-	tw, th = box_size
-	annotated = img_bgr.copy()
-	cv2.rectangle(annotated, box_tl, (box_tl[0] + tw, box_tl[1] + th), (0, 255, 0), 2)
-	cv2.circle(annotated, (int(click_point[0]), int(click_point[1])), 6, (0, 0, 255), -1)
-	path = os.path.join(DEBUG_SNAPSHOT_DIR, 'fallback_' + str(int(time.time())) + '.png')
-	cv2.imwrite(path, annotated)
-	print('Click point fell back to the matched box\'s center - saved ' + path + ' for review')
-
-
-class _Match(NamedTuple):
-	score: float
-	loc: tuple    # top-left, in search-area coordinates
-	size: tuple   # (width, height) of the template
-	template: str
-
-
-def _search_bounds(w: int, h: int):
-	"""(x0, y0, x1, y1) of the search band in full-screenshot pixel coordinates."""
-	return (int(w * FLOAT_SEARCH_X_RANGE[0]), int(h * FLOAT_SEARCH_Y_RANGE[0]),
-			int(w * FLOAT_SEARCH_X_RANGE[1]), int(h * FLOAT_SEARCH_Y_RANGE[1]))
-
-
-def _ui_boxes(w: int, h: int, bounds):
-	"""UI_EXCLUDE_REGIONS as (x0, y0, x1, y1) boxes in search-band coordinates, clipped to
-	the band and with empty ones dropped."""
-	search_x0, search_y0, search_x1, search_y1 = bounds
-	boxes = []
-	for (x_range, y_range) in UI_EXCLUDE_REGIONS:
-		x0 = max(0, int(w * x_range[0]) - search_x0)
-		x1 = min(search_x1 - search_x0, int(w * x_range[1]) - search_x0)
-		y0 = max(0, int(h * y_range[0]) - search_y0)
-		y1 = min(search_y1 - search_y0, int(h * y_range[1]) - search_y0)
-		if x1 > x0 and y1 > y0:
-			boxes.append((x0, y0, x1, y1))
-	return boxes
-
-
-def _build_color_mask(img_bgr: np.ndarray, ui_boxes, bounds):
-	"""The color-evidence mask for the search band: adaptive saturation mask with UI
-	frames blanked and oversized blobs dropped."""
-	x0, y0, x1, y1 = bounds
-	hsv = cv2.cvtColor(img_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
-	color_mask = _adaptive_color_mask(hsv, ui_boxes)
-
-	# Blank out each known UI player-frame's fixed spot (see UI_EXCLUDE_REGIONS above) so
-	# no candidate window anchored there can ever read as float-colored. Done before
-	# _drop_large_blobs, not after: a float rendering close enough to touch a UI frame's
-	# saturated pixels (8-connected) would otherwise merge with it into one blob whose
-	# combined bounding box clears FLOAT_MAX_BLOB_SIZE even though the float's own blob
-	# alone is nowhere near it, dropping the float's real color evidence as collateral
-	# damage before this exclusion ever gets a chance to run.
-	for bx0, by0, bx1, by1 in ui_boxes:
-		color_mask[by0:by1, bx0:bx1] = 0
+def _build_color_mask(hsv_band: np.ndarray, ui_boxes):
+	"""Evidence 1 over the band: the adaptive saturation mask, UI frames blanked, oversized blobs dropped.
+	The order matters: a float touching a UI frame's saturated pixels would otherwise merge with it into one
+	blob too big to keep, and its own evidence would be dropped as collateral."""
+	color_mask = _adaptive_color_mask(hsv_band, ui_boxes)
+	_blank_ui(color_mask, ui_boxes)
 	if DEBUG_SNAPSHOTS:
 		after_ui = int(np.count_nonzero(color_mask))
 		_, _, stats, _ = cv2.connectedComponentsWithStats(color_mask, connectivity=8)
@@ -374,43 +249,37 @@ def _build_color_mask(img_bgr: np.ndarray, ui_boxes, bounds):
 	return color_mask
 
 
-def _base_color_mask(img_bgr: np.ndarray, ui_boxes, bounds):
-	"""Pixels in the search band inside any FLOAT_BASE_COLOR_RANGES range, with UI frames blanked and
-	oversized blobs (water or scenery that happens to share the hue) dropped."""
-	x0, y0, x1, y1 = bounds
-	hsv = cv2.cvtColor(img_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+def _base_range_mask(hsv: np.ndarray):
+	"""Pixels inside any FLOAT_BASE_COLOR_RANGES range (single-pixel specks removed). The one definition of
+	"base-colored", shared by the evidence map and the click point."""
 	mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
 	for lo, hi in FLOAT_BASE_COLOR_RANGES:
 		mask |= cv2.inRange(hsv, lo, hi)
-	mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), dtype=np.uint8))
-	for bx0, by0, bx1, by1 in ui_boxes:
-		mask[by0:by1, bx0:bx1] = 0
+	return cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), dtype=np.uint8))
+
+
+def _base_color_mask(hsv_band: np.ndarray, ui_boxes):
+	"""Evidence 2 over the band: base-colored pixels, UI frames blanked, oversized blobs (water or scenery
+	that shares the hue) dropped."""
+	mask = _base_range_mask(hsv_band)
+	_blank_ui(mask, ui_boxes)
 	mask = _drop_large_blobs(mask, FLOAT_MAX_BLOB_SIZE)
 	_debug('base color: ' + str(int(np.count_nonzero(mask))) + ' px in the band inside the base color ranges')
 	return mask
 
 
-def _load_templates():
-	"""[(path, grayscale image)] for every template on disk."""
-	templates = []
-	for path in sorted(glob.glob(FLOAT_TEMPLATE_GLOB)):
-		template = cv2.imread(path, 0)
-		if template is not None:
-			templates.append((path, template))
-	return templates
+# ------------------------------------------------------------------------------ 3. candidates
 
+def _find_candidates(search_gray: np.ndarray, evidence_masks: Dict[str, np.ndarray], ui_boxes):
+	"""The best template match per kind of evidence: {evidence: Candidate or None}.
 
-def _match_templates(search_gray: np.ndarray, color_mask: np.ndarray, ui_boxes, base_mask: np.ndarray):
-	"""(gated, based) best template matches over the search band. `gated` only considers positions
-	with enough float-colored pixels nearby (the adaptive, saturation-relative color mask); `based`
-	only positions with enough base-colored pixels (FLOAT_BASE_COLOR_RANGES). Either is None if no
-	template could be loaded. Windows centered inside a UI box, and nearly featureless ones, are
-	excluded from both."""
-	gated: Optional[_Match] = None
-	based: Optional[_Match] = None
-	densities = {}   # same-size templates share one density map
-	base_densities = {}
-	textures = {}    # and one texture map
+	Each template is correlated over the whole band, then windows centered on a screen element or with no
+	texture are excluded. Per kind of evidence, the best window among those it supports is that template's
+	contender. (Picking the best window overall and asking afterwards would lose a real float that is not the
+	best-correlating spot, which on water it usually is not.)"""
+	best: Dict[str, Optional[Candidate]] = {evidence: None for evidence in EVIDENCE_PRIORITY}
+	densities = {}   # (evidence, window size) -> density map; same-size templates share one
+	textures = {}    # window size -> texture map
 	templates = _load_templates()
 	_debug('templates: ' + str(len(templates)) + ' loaded (scores below are after UI and texture exclusion), search band ' + str(search_gray.shape[1]) + 'x' + str(search_gray.shape[0]))
 	if not templates:
@@ -418,142 +287,126 @@ def _match_templates(search_gray: np.ndarray, color_mask: np.ndarray, ui_boxes, 
 	for template_path, template in templates:
 		th, tw = template.shape[:2]
 		if th > search_gray.shape[0] or tw > search_gray.shape[1]:
-			# A window shrunk (or minimized) so far that the search band is smaller than the
-			# template can't contain the float; matchTemplate would raise instead of scoring.
+			# a window shrunk so far that the band is smaller than the template: matchTemplate would raise
 			_debug('match: ' + template_path + ' (' + str(tw) + 'x' + str(th) + ') skipped - larger than the search band')
 			continue
 		result = cv2.matchTemplate(search_gray, template, cv2.TM_CCOEFF_NORMED)
-
 		rh, rw = result.shape
 		if DEBUG_SNAPSHOTS:
 			_, before_val, _, before_loc = cv2.minMaxLoc(result)
+
+		# result[y, x] scores the window anchored at (x, y); its center is (x + tw/2, y + th/2)
 		for bx0, by0, bx1, by1 in ui_boxes:
-			# result[y, x] scores the window anchored at (x, y); its center is (x + tw/2, y + th/2)
 			result[max(0, by0 - th // 2):max(0, by1 - th // 2), max(0, bx0 - tw // 2):max(0, bx1 - tw // 2)] = -1
 		if DEBUG_SNAPSHOTS:
 			_, after_ui_val, _, after_ui_loc = cv2.minMaxLoc(result)
 			if after_ui_loc != before_loc:
 				_debug('match: ' + template_path + ' UI exclusion removed its best spot ' + str(before_loc) + ' (score ' + str(round(before_val, 3))
 					+ ', window centered in a UI box); next best is ' + str(after_ui_loc) + ' (' + str(round(after_ui_val, 3)) + ')')
-
-		# Flat water correlates deceptively well - see FLOAT_MIN_TEXTURE.
 		if (tw, th) not in textures:
 			textures[(tw, th)] = _box_texture(search_gray, (tw, th))
 		result[textures[(tw, th)][:rh, :rw] < FLOAT_MIN_TEXTURE] = -1
 
-		_, raw_val, _, raw_loc = cv2.minMaxLoc(result)   # shape alone; only reported, never picked (see _pick_match)
-		if DEBUG_SNAPSHOTS and raw_loc != after_ui_loc:
+		_, shape_val, _, shape_loc = cv2.minMaxLoc(result)   # reported only: shape alone never decides
+		if DEBUG_SNAPSHOTS and shape_loc != after_ui_loc:
 			_debug('match: ' + template_path + ' texture floor (std ' + str(FLOAT_MIN_TEXTURE) + ') removed its best spot ' + str(after_ui_loc)
-				+ ' (score ' + str(round(after_ui_val, 3)) + ', a nearly featureless window); next best is ' + str(raw_loc) + ' (' + str(round(raw_val, 3)) + ')')
-		# Positions with base-colored pixels in them: the fallback for scenes where the adaptive gate
-		# below is blind (see _pick_match), which still leaves shape *and* a colored base as evidence.
-		if (tw, th) not in base_densities:
-			base_densities[(tw, th)] = _box_density(base_mask, (tw, th))
-		based_result = result.copy()
-		based_result[base_densities[(tw, th)][:rh, :rw] < FLOAT_MIN_COLOR_PIXELS] = -1
-		_, based_val, _, based_loc = cv2.minMaxLoc(based_result)
-		if based is None or based_val > based.score:
-			based = _Match(based_val, based_loc, (tw, th), template_path)
+				+ ' (score ' + str(round(after_ui_val, 3)) + ', a nearly featureless window); next best is ' + str(shape_loc) + ' (' + str(round(shape_val, 3)) + ')')
 
-		# Water/shoreline edges can score just as well as the real float on pure grayscale
-		# correlation, but the water is never as saturated/colorful as the float's bobber
-		# base - rule out any position that doesn't have enough of that color nearby
-		# before picking the best-scoring one.
-		if (tw, th) not in densities:
-			densities[(tw, th)] = _box_density(color_mask, (tw, th))
-		result[densities[(tw, th)][:rh, :rw] < FLOAT_MIN_COLOR_PIXELS] = -1
-
-		_, val, _, loc = cv2.minMaxLoc(result)
-		_debug('match: ' + template_path + ' (' + str(tw) + 'x' + str(th) + ') shape only ' + str(round(raw_val, 3)) + ' at ' + str(raw_loc)
-			+ ', with color gate ' + (str(round(val, 3)) + ' at ' + str(loc) if val > -1 else 'no position had enough float-colored pixels')
-			+ ', with base color ' + (str(round(based_val, 3)) + ' at ' + str(based_loc) if based_val > -1 else 'no position had enough base-colored pixels'))
-		if gated is None or val > gated.score:
-			gated = _Match(val, loc, (tw, th), template_path)
-	return gated, based
-
-
-def _pick_match(gated: Optional[_Match], based: Optional[_Match]) -> Optional[_Match]:
-	"""Choose the match to click, or None if nothing clears FLOAT_MATCH_THRESHOLD."""
-	# The color gate can fail to separate float from water in a scene, and the failure
-	# shows up the same way whatever the cause: the float's true position gets zeroed out
-	# so every gated candidate scores poorly while the shape match is still confident. Seen on
-	# real captures - a saturation-ceiling clip (threshold above 255, so nothing can pass), a
-	# moonlit scene whose water baseline leaves the whole band empty, and a warm dusk where the
-	# float scored 0.53-0.7 on shape yet every gated candidate topped out at 0.24-0.34
-	# (warm_dusk_gate_miss fixture). In all of them, stop trusting the gate and fall back to the shape
-	# match - but only among windows that contain the float's base color (FLOAT_BASE_COLOR_RANGES).
-	# Shape alone is not enough: on rippled dusk water the best-scoring window by shape was a pale wave
-	# crest 7 times in 81 casts (0.41-0.55) while the real float, small and dark, scored 0.30-0.56 elsewhere
-	# in the frame; the base color singled the float out in all 7. A colorless frame (login screen) has no
-	# such windows either, so it stays "not found".
-	best = gated
-	fell_back = False
-	if based is not None and based.score > FLOAT_MATCH_THRESHOLD \
-			and (best is None or best.score <= FLOAT_MATCH_THRESHOLD):
-		best = based
-		fell_back = True
-	if best is None or best.score <= FLOAT_MATCH_THRESHOLD:
-		_debug('pick: nothing above threshold ' + str(FLOAT_MATCH_THRESHOLD) + ' (gated '
-			+ (str(round(gated.score, 3)) if gated else 'none') + ', base-colored '
-			+ (str(round(based.score, 3)) if based else 'none') + ') - not found')
-		return None
-	_debug('pick: ' + ('gate found nothing above ' + str(FLOAT_MATCH_THRESHOLD) + ' - using the shape match among base-colored windows ' if fell_back else 'color-gated match ')
-		+ best.template + ' score ' + str(round(best.score, 3)) + ' at ' + str(best.loc))
+		line = 'match: ' + template_path + ' (' + str(tw) + 'x' + str(th) + ') shape only ' + str(round(shape_val, 3)) + ' at ' + str(shape_loc)
+		for evidence, label, empty in ((EVIDENCE_GATE, 'with color gate', 'float-colored'), (EVIDENCE_BASE, 'with base color', 'base-colored')):
+			if (evidence, tw, th) not in densities:
+				densities[(evidence, tw, th)] = _box_density(evidence_masks[evidence], (tw, th))
+			supported = result.copy()
+			supported[densities[(evidence, tw, th)][:rh, :rw] < FLOAT_MIN_COLOR_PIXELS] = -1
+			_, val, _, loc = cv2.minMaxLoc(supported)
+			if best[evidence] is None or val > best[evidence].score:
+				best[evidence] = Candidate(val, loc, (tw, th), template_path, evidence)
+			line += ', ' + label + ' ' + (str(round(val, 3)) + ' at ' + str(loc) if val > -1 else 'no position had enough ' + empty + ' pixels')
+		_debug(line)
 	return best
 
 
-def _click_point(img_bgr: np.ndarray, match: _Match, bounds):
-	"""Where to click for `match`: the base's color centroid if found, else the matched
-	box's geometric center (biased down, see FALLBACK_VERTICAL_BIAS)."""
-	h, w = img_bgr.shape[:2]
-	tw, th = match.size
-	tl = (match.loc[0] + bounds[0], match.loc[1] + bounds[1])   # back in full-screenshot coordinates
+# ------------------------------------------------------------------------------ 4. decide
 
-	# The tighter templates match a smaller, more exact silhouette, so a slightly
-	# imperfect grayscale alignment can leave the matched box mostly containing the
-	# feather with little or none of the base actually inside it. Pad the region the
-	# click point is searched in beyond the exact matched box so the base is still
-	# reachable even when the match itself is a bit off.
-	pad_x = int(tw * CLICK_SEARCH_PADDING_X_RATIO)
-	pad_top = int(th * CLICK_SEARCH_PADDING_TOP_RATIO)
-	pad_bottom = int(th * CLICK_SEARCH_PADDING_BOTTOM_RATIO)
-	x0, y0 = max(0, tl[0] - pad_x), max(0, tl[1] - pad_top)
-	x1, y1 = min(w, tl[0] + tw + pad_x), min(h, tl[1] + th + pad_bottom)
+def _decide(candidates: Dict[str, Optional[Candidate]]) -> Optional[Candidate]:
+	"""The candidate of the strongest kind of evidence that clears FLOAT_MATCH_THRESHOLD, or None.
+
+	The relative-saturation gate can be blind for reasons unrelated to the float - saturation clipped at the
+	ceiling, a moonlit sea whose water outshines it, a warm dusk that lifts the threshold above the float - and
+	then every gated candidate scores poorly even though the shape match is confident. The base-color evidence
+	covers those scenes. Shape alone is not evidence: on rippled dusk water the best window by shape was a pale
+	wave crest in 7 of 81 casts while the small, dark, real float sat elsewhere in the frame with a lower score."""
+	for evidence in EVIDENCE_PRIORITY:
+		candidate = candidates.get(evidence)
+		if candidate is not None and candidate.score > FLOAT_MATCH_THRESHOLD:
+			_debug('pick: ' + (evidence + ' match ' if evidence == EVIDENCE_GATE else 'gate found nothing above ' + str(FLOAT_MATCH_THRESHOLD)
+				+ ' - using the shape match among base-colored windows ') + candidate.template + ' score ' + str(round(candidate.score, 3)) + ' at ' + str(candidate.loc))
+			return candidate
+	scores = ', '.join(evidence + ' ' + (str(round(candidates[evidence].score, 3)) if candidates.get(evidence) else 'none') for evidence in EVIDENCE_PRIORITY)
+	_debug('pick: nothing above threshold ' + str(FLOAT_MATCH_THRESHOLD) + ' (' + scores + ') - not found')
+	return None
+
+
+# ------------------------------------------------------------------------------ 5. click point
+
+def _base_click_point(hsv_region: np.ndarray):
+	"""Centroid of the bobber base's color within `hsv_region` (region coordinates), or None when there is no
+	single solid base-colored blob to trust - scattered flecks that sum to a plausible total are what water
+	sharing the base's hue leaves behind, so the biggest component alone must clear the floor."""
+	mask, largest_component = _drop_small_blobs_stats(_base_range_mask(hsv_region), FLOAT_MAX_BLOB_SIZE)
+	if largest_component < FLOAT_MIN_BASE_BLOB_AREA:
+		_debug('click: base color not found (largest blob ' + str(largest_component) + ' px, need ' + str(FLOAT_MIN_BASE_BLOB_AREA) + ')')
+		return None
+	moments = cv2.moments(mask, binaryImage=True)
+	_debug('click: base color found (largest blob ' + str(largest_component) + ' px, ' + str(int(moments['m00'])) + ' px total)')
+	return moments['m10'] / moments['m00'], moments['m01'] / moments['m00']
+
+
+def _save_fallback_debug_snapshot(img_bgr: np.ndarray, box_tl, box_size, click_point):
+	"""If DEBUG_SNAPSHOTS is on, save the screenshot with the matched box and click point drawn on it, so a click
+	that fell back to the geometric center can be checked after the fact. No-op otherwise."""
+	if not DEBUG_SNAPSHOTS:
+		return
+	os.makedirs(DEBUG_SNAPSHOT_DIR, exist_ok=True)
+	tw, th = box_size
+	annotated = img_bgr.copy()
+	cv2.rectangle(annotated, box_tl, (box_tl[0] + tw, box_tl[1] + th), (0, 255, 0), 2)
+	cv2.circle(annotated, (int(click_point[0]), int(click_point[1])), 6, (0, 0, 255), -1)
+	path = os.path.join(DEBUG_SNAPSHOT_DIR, 'fallback_' + str(int(time.time())) + '.png')
+	cv2.imwrite(path, annotated)
+	print('Click point fell back to the matched box\'s center - saved ' + path + ' for review')
+
+
+def _click_point(img_bgr: np.ndarray, hsv: np.ndarray, candidate: Candidate, bounds):
+	"""((x, y), on_base_color) in the image's pixels: the base's color centroid near the match, else the
+	match's geometric center."""
+	h, w = img_bgr.shape[:2]
+	tw, th = candidate.size
+	tl = (candidate.loc[0] + bounds[0], candidate.loc[1] + bounds[1])   # back in full-image coordinates
+
+	# A tight template can leave the box mostly feather with little of the base inside it, so the base is
+	# searched in the box padded beyond it (down and sideways only).
+	x0, y0 = max(0, tl[0] - int(tw * CLICK_SEARCH_PADDING_X_RATIO)), max(0, tl[1] - int(th * CLICK_SEARCH_PADDING_TOP_RATIO))
+	x1, y1 = min(w, tl[0] + tw + int(tw * CLICK_SEARCH_PADDING_X_RATIO)), min(h, tl[1] + th + int(th * CLICK_SEARCH_PADDING_BOTTOM_RATIO))
 	_debug('click: searching for the base color in region (' + str(x0) + ',' + str(y0) + ')-(' + str(x1) + ',' + str(y1) + ')')
-	point = _float_click_point(img_bgr[y0:y1, x0:x1])
+	point = _base_click_point(hsv[y0:y1, x0:x1])
 	if point is not None:
 		_debug('click: using the base color centroid ' + str((round(x0 + point[0], 1), round(y0 + point[1], 1))))
-		return x0 + point[0], y0 + point[1]
+		return (x0 + point[0], y0 + point[1]), True
 
 	fallback_point = (tl[0] + tw / 2, tl[1] + th * FALLBACK_VERTICAL_BIAS)
 	_debug('click: using the matched box\'s center, ' + str(FALLBACK_VERTICAL_BIAS) + ' of the way down: ' + str((round(fallback_point[0], 1), round(fallback_point[1], 1))))
-	_save_fallback_debug_snapshot(img_bgr, tl, match.size, fallback_point)
-	return fallback_point
+	_save_fallback_debug_snapshot(img_bgr, tl, candidate.size, fallback_point)
+	return fallback_point, False
 
 
-def _normalization_scale(width: int):
-	"""Factor to resize a screenshot `width` px wide by before matching, or 1 to leave it alone
-	(see FLOAT_REFERENCE_WIDTH)."""
-	low, high = FLOAT_UNSCALED_WIDTH_RATIOS
-	ratio = width / FLOAT_REFERENCE_WIDTH
-	if low <= ratio <= high:
-		return 1
-	scale = FLOAT_REFERENCE_WIDTH / width
-	return scale if scale <= FLOAT_MAX_UPSCALE else 1
+# ------------------------------------------------------------------------------ entry points
 
-
-def find_float(screenshot_path):
-	"""Pixel (x, y) to click for the float in the screenshot, or None if not found."""
-	# Tried masked template matching (matchTemplate(..., mask=...) so the background
-	# water can't affect the score) to get one "universal" background-free template
-	# instead of several lighting-specific ones - scores looked great (0.97+) but
-	# locations were wildly wrong (100-500px off), since a sparse color-only mask
-	# throws away the float's shape and just matches any similarly-colored blob. Not
-	# worth revisiting without a much more careful mask.
+def find_float_detailed(screenshot_path) -> Optional[Detection]:
+	"""The float in the screenshot with the evidence behind it, or None if not found."""
 	img_bgr = cv2.imread(screenshot_path)
 	if img_bgr is None:
-		# e.g. a screenshot caught mid-write by a concurrent reader - not worth
-		# crashing the whole bot over, so log it and treat it like "not found".
+		# e.g. a screenshot caught mid-write by a concurrent reader - treat it like "not found"
 		print('Could not read screenshot: ' + screenshot_path)
 		return None
 	h, w = img_bgr.shape[:2]
@@ -566,25 +419,31 @@ def find_float(screenshot_path):
 	bounds = _search_bounds(w, h)
 	x0, y0, x1, y1 = bounds
 	_debug('start: ' + screenshot_path + ' is ' + str(w) + 'x' + str(h) + ', search band x ' + str(x0) + '-' + str(x1) + ' y ' + str(y0) + '-' + str(y1))
-	# noinspection PyTypeChecker
-	search_gray: np.ndarray = cv2.cvtColor(img_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY) if x1 > x0 and y1 > y0 else None
-	if search_gray is None:
+	if x1 <= x0 or y1 <= y0:
 		_debug('end: the search band is empty (degenerate screenshot) - not found')
-		return None   # a degenerate (e.g. minimized-window) screenshot has no search band at all
+		return None   # e.g. a minimized window: nothing to search
 
+	hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+	hsv_band = hsv[y0:y1, x0:x1]
+	search_gray = cv2.cvtColor(img_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
 	ui_boxes = _ui_boxes(w, h, bounds)
 	_debug('ui: excluding ' + str(len(ui_boxes)) + ' box(es) inside the band: ' + str(ui_boxes))
-	color_mask = _build_color_mask(img_bgr, ui_boxes, bounds)
-	base_mask = _base_color_mask(img_bgr, ui_boxes, bounds)
-	gated, based = _match_templates(search_gray, color_mask, ui_boxes, base_mask)
-	match = _pick_match(gated, based)
-	if match is None:
+
+	evidence_masks = {EVIDENCE_GATE: _build_color_mask(hsv_band, ui_boxes), EVIDENCE_BASE: _base_color_mask(hsv_band, ui_boxes)}
+	candidate = _decide(_find_candidates(search_gray, evidence_masks, ui_boxes))
+	if candidate is None:
 		_debug('end: float not found')
 		return None
 
-	point = _click_point(img_bgr, match, bounds)
-	print('Matched ' + match.template + ' (score ' + str(round(match.score, 3)) + ')')
+	point, on_base_color = _click_point(img_bgr, hsv, candidate, bounds)
+	print('Matched ' + candidate.template + ' (score ' + str(round(candidate.score, 3)) + ')')
 	if scale != 1:
 		point = (point[0] / scale, point[1] / scale)   # back to the original screenshot's pixels
 	_debug('end: click point ' + str((round(point[0], 1), round(point[1], 1))))
-	return point
+	return Detection(point, candidate.evidence, candidate.score, candidate.template, on_base_color)
+
+
+def find_float(screenshot_path):
+	"""Pixel (x, y) to click for the float in the screenshot, or None if not found."""
+	detection = find_float_detailed(screenshot_path)
+	return None if detection is None else detection.point
