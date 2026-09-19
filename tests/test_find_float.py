@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from float_detector import (FLOAT_MAX_BLOB_SIZE, FLOAT_MIN_TEXTURE, _adaptive_color_mask, _box_texture, _build_color_mask,
-								_drop_large_blobs, _Match, _normalization_scale, _pick_match, find_float)
+								_drop_large_blobs, _float_click_point, _Match, _normalization_scale, _pick_match, find_float)
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), 'fixtures')
 TOLERANCE_PX = 20
@@ -42,6 +42,9 @@ FLOAT_CASES = [
 	 'WoW window shrunk to 919x524: the float is ~25 px against templates of 50-140 px and was not found '
 	 '5 times in 14; matching on a copy resized to the reference width finds it (see FLOAT_REFERENCE_WIDTH). '
 	 'Tolerance is in this small window\'s own pixels'),
+	('small_float_on_pale_water.png', (1218, 853), 20, [(1688, 598)],
+	 'dusk water with pale wave crests and a small, dark float (cast far out): by shape alone the best window was '
+	 'a wave crest at (1688, 598), 7 times in 81 casts - the float\'s base is the only base-colored spot in the band'),
 	('dim_night_base_color.png', (1355.61, 695.46), TOLERANCE_PX, [],
 	 'dark night base: hue inside the daylight range but S/V far below its floors, so '
 	 'every cast fell back to the geometric center; needs the dim base color range'),
@@ -460,3 +463,52 @@ def test_debug_says_when_it_matches_on_a_resized_copy(capsys, monkeypatch):
 
 	lines = '\n'.join(_debug_lines(capsys))
 	assert 'scale: 919px wide' in lines and 'resized by 2.78' in lines
+
+
+def _hsv_patch(h, s, v, size=12, canvas=(60, 80), background=(115, 60, 40)):
+	"""A canvas of `background` HSV with a size x size patch of (h, s, v) in the middle, as BGR."""
+	hsv = np.zeros((*canvas, 3), dtype=np.uint8)
+	hsv[:, :] = background
+	top, left = (canvas[0] - size) // 2, (canvas[1] - size) // 2
+	hsv[top:top + size, left:left + size] = (h, s, v)
+	return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+
+def test_click_point_finds_a_dark_desaturated_green_base():
+	"""The base measured on 68 real floats from a dusk-to-night session: H 52-94, S 27-90, V 19-57.
+	None of the older ranges reached it, so every cast fell back to the box-center click."""
+	point = _float_click_point(_hsv_patch(66, 46, 38))
+
+	assert point is not None
+	assert abs(point[0] - 40) <= 2 and abs(point[1] - 30) <= 2
+
+
+def test_click_point_ignores_pale_blue_water_that_the_fallback_used_to_pick():
+	"""Regions where the fallback picked sky-reflection water instead of a float have hue 100-120."""
+	assert _float_click_point(_hsv_patch(110, 50, 200)) is None
+
+
+def test_a_float_with_no_base_color_anywhere_is_not_found_on_shape_alone(capsys, monkeypatch, tmp_path):
+	"""Shape alone used to be enough once the color gate was blind, and it picked pale wave crests. The same
+	frame with all color removed keeps the float's shape but has no base-colored window anywhere."""
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
+	gray = cv2.cvtColor(cv2.imread(os.path.join(FIXTURE_DIR, 'small_float_on_pale_water.png')), cv2.COLOR_BGR2GRAY)
+	path = tmp_path / 'colorless.png'
+	cv2.imwrite(str(path), cv2.merge([gray, gray, gray]))
+
+	assert find_float(str(path)) is None
+
+	lines = '\n'.join(_debug_lines(capsys))
+	assert 'base color: 0 px' in lines
+	assert 'no position had enough base-colored pixels' in lines
+	assert 'end: float not found' in lines
+
+
+def test_debug_reports_the_base_color_pixels_and_the_windows_that_have_it(capsys, monkeypatch):
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
+
+	find_float(os.path.join(FIXTURE_DIR, 'small_float_on_pale_water.png'))
+
+	lines = '\n'.join(_debug_lines(capsys))
+	assert 'using the shape match among base-colored windows' in lines
+	assert 'with base color ' in lines

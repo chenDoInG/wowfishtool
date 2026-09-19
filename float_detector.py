@@ -122,6 +122,11 @@ FLOAT_BASE_COLOR_RANGES = (
 	# was clearly visible. Same hue window as the daylight range (this is that same base
 	# color, just dimmed by night lighting, not a different tint), with S/V floors
 	# lowered to admit it.
+	((35, 25, 25), (95, 120, 200)),    # dark, desaturated GREEN base: measured on 68 real floats from a dusk-to-night
+	# session (base pixels H 52-94, S 27-90, V 19-57) - none of the ranges above came near it (hue 40-75 needs V >= 120;
+	# the warm ones sit at hue 10-35), so all 81 casts in that session fell back to the box-center click. This range found
+	# a base blob (>= FLOAT_MIN_BASE_BLOB_AREA px) in 66 of those 68 real-float regions and in 0 of 7 regions where the
+	# fallback had picked pale sky-reflection water instead of a float (their hue is 100-120).
 )
 # A warm-enough dusk sea can put the *water itself* inside the daylight base range above
 # over a wide, contiguous area - not just the float. _drop_large_blobs correctly strips
@@ -369,6 +374,22 @@ def _build_color_mask(img_bgr: np.ndarray, ui_boxes, bounds):
 	return color_mask
 
 
+def _base_color_mask(img_bgr: np.ndarray, ui_boxes, bounds):
+	"""Pixels in the search band inside any FLOAT_BASE_COLOR_RANGES range, with UI frames blanked and
+	oversized blobs (water or scenery that happens to share the hue) dropped."""
+	x0, y0, x1, y1 = bounds
+	hsv = cv2.cvtColor(img_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+	mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+	for lo, hi in FLOAT_BASE_COLOR_RANGES:
+		mask |= cv2.inRange(hsv, lo, hi)
+	mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), dtype=np.uint8))
+	for bx0, by0, bx1, by1 in ui_boxes:
+		mask[by0:by1, bx0:bx1] = 0
+	mask = _drop_large_blobs(mask, FLOAT_MAX_BLOB_SIZE)
+	_debug('base color: ' + str(int(np.count_nonzero(mask))) + ' px in the band inside the base color ranges')
+	return mask
+
+
 def _load_templates():
 	"""[(path, grayscale image)] for every template on disk."""
 	templates = []
@@ -379,15 +400,16 @@ def _load_templates():
 	return templates
 
 
-def _match_templates(search_gray: np.ndarray, color_mask: np.ndarray, ui_boxes):
-	"""(gated, raw) best template matches over the search band. `raw` ignores color;
-	`gated` only considers positions with enough float-colored pixels nearby. Either is
-	None if no template could be loaded. Windows centered inside a UI box are excluded
-	from both, so a screen element can't win whichever path ends up being used - the
-	color mask alone only protects the gated one (see _pick_match())."""
+def _match_templates(search_gray: np.ndarray, color_mask: np.ndarray, ui_boxes, base_mask: np.ndarray):
+	"""(gated, based) best template matches over the search band. `gated` only considers positions
+	with enough float-colored pixels nearby (the adaptive, saturation-relative color mask); `based`
+	only positions with enough base-colored pixels (FLOAT_BASE_COLOR_RANGES). Either is None if no
+	template could be loaded. Windows centered inside a UI box, and nearly featureless ones, are
+	excluded from both."""
 	gated: Optional[_Match] = None
-	raw: Optional[_Match] = None
+	based: Optional[_Match] = None
 	densities = {}   # same-size templates share one density map
+	base_densities = {}
 	textures = {}    # and one texture map
 	templates = _load_templates()
 	_debug('templates: ' + str(len(templates)) + ' loaded (scores below are after UI and texture exclusion), search band ' + str(search_gray.shape[1]) + 'x' + str(search_gray.shape[0]))
@@ -419,12 +441,19 @@ def _match_templates(search_gray: np.ndarray, color_mask: np.ndarray, ui_boxes):
 			textures[(tw, th)] = _box_texture(search_gray, (tw, th))
 		result[textures[(tw, th)][:rh, :rw] < FLOAT_MIN_TEXTURE] = -1
 
-		_, raw_val, _, raw_loc = cv2.minMaxLoc(result)
+		_, raw_val, _, raw_loc = cv2.minMaxLoc(result)   # shape alone; only reported, never picked (see _pick_match)
 		if DEBUG_SNAPSHOTS and raw_loc != after_ui_loc:
 			_debug('match: ' + template_path + ' texture floor (std ' + str(FLOAT_MIN_TEXTURE) + ') removed its best spot ' + str(after_ui_loc)
 				+ ' (score ' + str(round(after_ui_val, 3)) + ', a nearly featureless window); next best is ' + str(raw_loc) + ' (' + str(round(raw_val, 3)) + ')')
-		if raw is None or raw_val > raw.score:
-			raw = _Match(raw_val, raw_loc, (tw, th), template_path)
+		# Positions with base-colored pixels in them: the fallback for scenes where the adaptive gate
+		# below is blind (see _pick_match), which still leaves shape *and* a colored base as evidence.
+		if (tw, th) not in base_densities:
+			base_densities[(tw, th)] = _box_density(base_mask, (tw, th))
+		based_result = result.copy()
+		based_result[base_densities[(tw, th)][:rh, :rw] < FLOAT_MIN_COLOR_PIXELS] = -1
+		_, based_val, _, based_loc = cv2.minMaxLoc(based_result)
+		if based is None or based_val > based.score:
+			based = _Match(based_val, based_loc, (tw, th), template_path)
 
 		# Water/shoreline edges can score just as well as the real float on pure grayscale
 		# correlation, but the water is never as saturated/colorful as the float's bobber
@@ -435,35 +464,40 @@ def _match_templates(search_gray: np.ndarray, color_mask: np.ndarray, ui_boxes):
 		result[densities[(tw, th)][:rh, :rw] < FLOAT_MIN_COLOR_PIXELS] = -1
 
 		_, val, _, loc = cv2.minMaxLoc(result)
-		_debug('match: ' + template_path + ' (' + str(tw) + 'x' + str(th) + ') raw ' + str(round(raw_val, 3)) + ' at ' + str(raw_loc)
-			+ ', with color gate ' + (str(round(val, 3)) + ' at ' + str(loc) if val > -1 else 'no position had enough float-colored pixels'))
+		_debug('match: ' + template_path + ' (' + str(tw) + 'x' + str(th) + ') shape only ' + str(round(raw_val, 3)) + ' at ' + str(raw_loc)
+			+ ', with color gate ' + (str(round(val, 3)) + ' at ' + str(loc) if val > -1 else 'no position had enough float-colored pixels')
+			+ ', with base color ' + (str(round(based_val, 3)) + ' at ' + str(based_loc) if based_val > -1 else 'no position had enough base-colored pixels'))
 		if gated is None or val > gated.score:
 			gated = _Match(val, loc, (tw, th), template_path)
-	return gated, raw
+	return gated, based
 
 
-def _pick_match(gated: Optional[_Match], raw: Optional[_Match]) -> Optional[_Match]:
+def _pick_match(gated: Optional[_Match], based: Optional[_Match]) -> Optional[_Match]:
 	"""Choose the match to click, or None if nothing clears FLOAT_MATCH_THRESHOLD."""
 	# The color gate can fail to separate float from water in a scene, and the failure
 	# shows up the same way whatever the cause: the float's true position gets zeroed out
-	# so every gated candidate scores poorly while the ungated shape match is still
-	# confident. Seen on real captures - a saturation-ceiling clip (threshold above 255, so
-	# nothing can pass), a moonlit scene whose water baseline leaves the whole band empty,
-	# and a warm dusk where the float scored 0.53-0.7 ungated yet every gated candidate
-	# topped out at 0.24-0.34 (warm_dusk_gate_miss fixture). In all of them, stop
-	# trusting the gate and use the grayscale shape match alone. A colorless frame
-	# (login screen) is also gated to nothing, but its ungated score is below threshold too.
+	# so every gated candidate scores poorly while the shape match is still confident. Seen on
+	# real captures - a saturation-ceiling clip (threshold above 255, so nothing can pass), a
+	# moonlit scene whose water baseline leaves the whole band empty, and a warm dusk where the
+	# float scored 0.53-0.7 on shape yet every gated candidate topped out at 0.24-0.34
+	# (warm_dusk_gate_miss fixture). In all of them, stop trusting the gate and fall back to the shape
+	# match - but only among windows that contain the float's base color (FLOAT_BASE_COLOR_RANGES).
+	# Shape alone is not enough: on rippled dusk water the best-scoring window by shape was a pale wave
+	# crest 7 times in 81 casts (0.41-0.55) while the real float, small and dark, scored 0.30-0.56 elsewhere
+	# in the frame; the base color singled the float out in all 7. A colorless frame (login screen) has no
+	# such windows either, so it stays "not found".
 	best = gated
 	fell_back = False
-	if raw is not None and raw.score > FLOAT_MATCH_THRESHOLD \
+	if based is not None and based.score > FLOAT_MATCH_THRESHOLD \
 			and (best is None or best.score <= FLOAT_MATCH_THRESHOLD):
-		best = raw
+		best = based
 		fell_back = True
 	if best is None or best.score <= FLOAT_MATCH_THRESHOLD:
 		_debug('pick: nothing above threshold ' + str(FLOAT_MATCH_THRESHOLD) + ' (gated '
-			+ (str(round(gated.score, 3)) if gated else 'none') + ', raw ' + (str(round(raw.score, 3)) if raw else 'none') + ') - not found')
+			+ (str(round(gated.score, 3)) if gated else 'none') + ', base-colored '
+			+ (str(round(based.score, 3)) if based else 'none') + ') - not found')
 		return None
-	_debug('pick: ' + ('gate found nothing above ' + str(FLOAT_MATCH_THRESHOLD) + ' - using the ungated shape match ' if fell_back else 'color-gated match ')
+	_debug('pick: ' + ('gate found nothing above ' + str(FLOAT_MATCH_THRESHOLD) + ' - using the shape match among base-colored windows ' if fell_back else 'color-gated match ')
 		+ best.template + ' score ' + str(round(best.score, 3)) + ' at ' + str(best.loc))
 	return best
 
@@ -541,14 +575,15 @@ def find_float(screenshot_path):
 	ui_boxes = _ui_boxes(w, h, bounds)
 	_debug('ui: excluding ' + str(len(ui_boxes)) + ' box(es) inside the band: ' + str(ui_boxes))
 	color_mask = _build_color_mask(img_bgr, ui_boxes, bounds)
-	gated, raw = _match_templates(search_gray, color_mask, ui_boxes)
-	match = _pick_match(gated, raw)
+	base_mask = _base_color_mask(img_bgr, ui_boxes, bounds)
+	gated, based = _match_templates(search_gray, color_mask, ui_boxes, base_mask)
+	match = _pick_match(gated, based)
 	if match is None:
 		_debug('end: float not found')
 		return None
 
-	print('Matched ' + match.template + ' (score ' + str(round(match.score, 3)) + ')')
 	point = _click_point(img_bgr, match, bounds)
+	print('Matched ' + match.template + ' (score ' + str(round(match.score, 3)) + ')')
 	if scale != 1:
 		point = (point[0] / scale, point[1] / scale)   # back to the original screenshot's pixels
 	_debug('end: click point ' + str((round(point[0], 1), round(point[1], 1))))
