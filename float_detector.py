@@ -173,6 +173,20 @@ FALLBACK_VERTICAL_BIAS = 0.65
 # water, not strongly textured water (moon glitter) that happens to correlate well.
 FLOAT_MIN_TEXTURE = 6
 
+# The templates are fixed-size crops of a float from a full-size game window (~2560 px wide, a few
+# from a 1893 px one), so they only match a float of about that apparent size. Shrink the WoW
+# window and the float shrinks with it: in a real 919x524 window it was ~25 px against templates of
+# 50-140 px, and 5 of 14 completed casts came back "not found" with the float plainly in the water.
+# Matching on a copy of the screenshot resized to FLOAT_REFERENCE_WIDTH found it in all 4 saved
+# frames, within ~6 px. Screenshots inside FLOAT_UNSCALED_WIDTH_RATIOS are left alone: the fixtures
+# resized to 0.3-0.6 and 1.5-2.0 x their size all match, and at 0.7-0.75 x an unscaled Stormwind canal
+# was 795 px off while a normalized one is 8 px off, hence the 0.8 lower bound (the 1893 px fixtures, ratio
+# 0.74, give the same answers either way). Results are always reported in the original screenshot's
+# pixels. A cap keeps a degenerate, tiny screenshot from being blown up into a huge image.
+FLOAT_REFERENCE_WIDTH = 2556
+FLOAT_UNSCALED_WIDTH_RATIOS = (0.8, 1.4)
+FLOAT_MAX_UPSCALE = 4
+
 # Off by default so a normal run never touches disk for this - flip to True (fishing.py
 # does this for you when its own DEBUG_SNAPSHOTS is set, see there) to save an annotated
 # screenshot into DEBUG_SNAPSHOT_DIR any time the click point falls back to the matched
@@ -483,6 +497,17 @@ def _click_point(img_bgr: np.ndarray, match: _Match, bounds):
 	return fallback_point
 
 
+def _normalization_scale(width: int):
+	"""Factor to resize a screenshot `width` px wide by before matching, or 1 to leave it alone
+	(see FLOAT_REFERENCE_WIDTH)."""
+	low, high = FLOAT_UNSCALED_WIDTH_RATIOS
+	ratio = width / FLOAT_REFERENCE_WIDTH
+	if low <= ratio <= high:
+		return 1
+	scale = FLOAT_REFERENCE_WIDTH / width
+	return scale if scale <= FLOAT_MAX_UPSCALE else 1
+
+
 def find_float(screenshot_path):
 	"""Pixel (x, y) to click for the float in the screenshot, or None if not found."""
 	# Tried masked template matching (matchTemplate(..., mask=...) so the background
@@ -498,6 +523,12 @@ def find_float(screenshot_path):
 		print('Could not read screenshot: ' + screenshot_path)
 		return None
 	h, w = img_bgr.shape[:2]
+	scale = _normalization_scale(w)
+	if scale != 1:
+		_debug('scale: ' + str(w) + 'px wide is ' + str(round(w / FLOAT_REFERENCE_WIDTH, 2)) + 'x the reference width ' + str(FLOAT_REFERENCE_WIDTH)
+			+ ' - matching on a copy resized by ' + str(round(scale, 2)))
+		img_bgr = cv2.resize(img_bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA)
+		h, w = img_bgr.shape[:2]
 	bounds = _search_bounds(w, h)
 	x0, y0, x1, y1 = bounds
 	_debug('start: ' + screenshot_path + ' is ' + str(w) + 'x' + str(h) + ', search band x ' + str(x0) + '-' + str(x1) + ' y ' + str(y0) + '-' + str(y1))
@@ -518,5 +549,7 @@ def find_float(screenshot_path):
 
 	print('Matched ' + match.template + ' (score ' + str(round(match.score, 3)) + ')')
 	point = _click_point(img_bgr, match, bounds)
+	if scale != 1:
+		point = (point[0] / scale, point[1] / scale)   # back to the original screenshot's pixels
 	_debug('end: click point ' + str((round(point[0], 1), round(point[1], 1))))
 	return point

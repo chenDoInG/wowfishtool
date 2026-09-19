@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from float_detector import (FLOAT_MAX_BLOB_SIZE, FLOAT_MIN_TEXTURE, _adaptive_color_mask, _box_texture, _build_color_mask,
-								_drop_large_blobs, _Match, _pick_match, find_float)
+								_drop_large_blobs, _Match, _normalization_scale, _pick_match, find_float)
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), 'fixtures')
 TOLERANCE_PX = 20
@@ -38,6 +38,10 @@ FLOAT_CASES = [
 	('saturation_ceiling_clip.png', (914, 615), TOLERANCE_PX, [],
 	 'water so saturated the gate threshold exceeds 255 - the gate passes nothing, so '
 	 'the ungated grayscale match must carry it (score 0.659)'),
+	('small_window_float.png', (418, 316), 12, [],
+	 'WoW window shrunk to 919x524: the float is ~25 px against templates of 50-140 px and was not found '
+	 '5 times in 14; matching on a copy resized to the reference width finds it (see FLOAT_REFERENCE_WIDTH). '
+	 'Tolerance is in this small window\'s own pixels'),
 	('dim_night_base_color.png', (1355.61, 695.46), TOLERANCE_PX, [],
 	 'dark night base: hue inside the daylight range but S/V far below its floors, so '
 	 'every cast fell back to the geometric center; needs the dim base color range'),
@@ -418,3 +422,41 @@ def test_debug_says_when_the_texture_floor_removed_a_templates_best_spot(capsys,
 	lines = '\n'.join(_debug_lines(capsys))
 	assert 'texture floor (std ' in lines and 'nearly featureless window' in lines
 	assert 'end: float not found' in lines
+
+
+def _resized_fixture(name, factor, tmp_path):
+	img = cv2.imread(os.path.join(FIXTURE_DIR, name))
+	img = cv2.resize(img, None, fx=factor, fy=factor, interpolation=cv2.INTER_AREA if factor < 1 else cv2.INTER_CUBIC)
+	path = tmp_path / 'resized.png'
+	cv2.imwrite(str(path), img)
+	return str(path)
+
+
+@pytest.mark.parametrize('factor', [0.4, 0.75, 1.8])
+def test_find_float_reports_the_position_in_the_screenshots_own_pixels_at_any_window_size(tmp_path, factor):
+	"""The same capture shrunk or enlarged to a different window size must still find the float,
+	and the answer must be in that screenshot's pixels (the bot moves the mouse by it)."""
+	place = find_float(_resized_fixture('dusk_saturated_water.png', factor, tmp_path))
+
+	assert place is not None
+	assert abs(place[0] - 1245 * factor) <= 12 * max(factor, 1)
+	assert abs(place[1] - 695 * factor) <= 12 * max(factor, 1)
+
+
+@pytest.mark.parametrize('width, scale', [(2556, 1), (2560, 1), (3000, 1), (2100, 1), (2000, 2556 / 2000), (1893, 2556 / 1893), (919, 2556 / 919), (3840, 2556 / 3840)])
+def test_normalization_scale(width, scale):
+	"""Wide-but-normal windows are left alone; small and very large ones are matched on a resized copy."""
+	assert _normalization_scale(width) == pytest.approx(scale)
+
+
+def test_normalization_scale_never_blows_a_tiny_screenshot_up_into_a_huge_one():
+	assert _normalization_scale(300) == 1
+
+
+def test_debug_says_when_it_matches_on_a_resized_copy(capsys, monkeypatch):
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
+
+	find_float(os.path.join(FIXTURE_DIR, 'small_window_float.png'))
+
+	lines = '\n'.join(_debug_lines(capsys))
+	assert 'scale: 919px wide' in lines and 'resized by 2.78' in lines
