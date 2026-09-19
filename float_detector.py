@@ -170,6 +170,13 @@ DEBUG_SNAPSHOTS = False
 DEBUG_SNAPSHOT_DIR = 'debug'   # kept out of var/, which holds the bot's real runtime data
 
 
+def _debug(message):
+	"""Trace line for one step of find_float(), printed only while DEBUG_SNAPSHOTS is on. Callers
+	that would do real work just to build the message check DEBUG_SNAPSHOTS first."""
+	if DEBUG_SNAPSHOTS:
+		print('[float] ' + message)
+
+
 def _box_density(mask: np.ndarray, window_size):
 	"""Per-pixel count of nonzero `mask` pixels in a window_size box anchored at that
 	pixel's top-left, i.e. density[y, x] covers the same box matchTemplate's
@@ -196,18 +203,6 @@ def _drop_large_blobs(mask: np.ndarray, max_size: int):
 	return _drop_small_blobs_stats(mask, max_size)[0]
 
 
-def _saturation_percentile(saturation: np.ndarray, percentile: float):
-	"""np.percentile (linear interpolation) of a uint8 channel, via a 256-bin histogram
-	instead of sorting the whole region - identical result, much cheaper."""
-	counts = np.bincount(saturation.ravel(), minlength=256)
-	cumulative = np.cumsum(counts)
-	rank = percentile / 100 * (saturation.size - 1)
-	lo, hi = int(np.floor(rank)), int(np.ceil(rank))
-	lo_val = np.searchsorted(cumulative, lo + 1)   # value of the lo-th order statistic
-	hi_val = np.searchsorted(cumulative, hi + 1)
-	return lo_val + (hi_val - lo_val) * (rank - lo)
-
-
 def _adaptive_color_mask(hsv_region: np.ndarray, ui_boxes=()):
 	"""Pixels distinctly more saturated than this scene's own water, regardless of what
 	hue that happens to be - see the comment on FLOAT_SATURATION_MARGIN above.
@@ -231,9 +226,14 @@ def _adaptive_color_mask(hsv_region: np.ndarray, ui_boxes=()):
 		water_pixels[by0:by1, bx0:bx1] = False
 	if not water_pixels.any():
 		water_pixels[:] = True
-	water_baseline = _saturation_percentile(saturation[water_pixels], FLOAT_SATURATION_BASELINE_PERCENTILE)
+	water_baseline = np.percentile(saturation[water_pixels], FLOAT_SATURATION_BASELINE_PERCENTILE)
 	threshold = water_baseline + FLOAT_SATURATION_MARGIN
-	return ((saturation > threshold) & (value > FLOAT_MIN_VALUE)).astype(np.uint8) * 255
+	mask = ((saturation > threshold) & (value > FLOAT_MIN_VALUE)).astype(np.uint8) * 255
+	if DEBUG_SNAPSHOTS:
+		_debug('gate: water baseline (S p' + str(FLOAT_SATURATION_BASELINE_PERCENTILE) + ', UI boxes skipped) = ' + str(round(float(water_baseline), 1))
+			+ ', threshold = ' + str(round(float(threshold), 1)) + (' (above 255: nothing can pass)' if threshold > 255 else '')
+			+ ', float-colored pixels = ' + str(int(np.count_nonzero(mask))))
+	return mask
 
 
 def _float_click_point(bgr_region: np.ndarray):
@@ -253,8 +253,10 @@ def _float_click_point(bgr_region: np.ndarray):
 	# real base is one solid blob, so require whichever single component is biggest to
 	# look like one, not the total across however many there are.
 	if largest_component < FLOAT_MIN_BASE_BLOB_AREA:
+		_debug('click: base color not found (largest blob ' + str(largest_component) + ' px, need ' + str(FLOAT_MIN_BASE_BLOB_AREA) + ')')
 		return None
 	moments = cv2.moments(mask, binaryImage=True)
+	_debug('click: base color found (largest blob ' + str(largest_component) + ' px, ' + str(int(moments['m00'])) + ' px total)')
 	return moments['m10'] / moments['m00'], moments['m01'] / moments['m00']
 
 
@@ -319,26 +321,21 @@ def _build_color_mask(img_bgr: np.ndarray, ui_boxes, bounds):
 	# damage before this exclusion ever gets a chance to run.
 	for bx0, by0, bx1, by1 in ui_boxes:
 		color_mask[by0:by1, bx0:bx1] = 0
-	return _drop_large_blobs(color_mask, FLOAT_MAX_BLOB_SIZE)
-
-
-_template_cache = {}   # path -> (mtime, grayscale image or None)
+	after_ui = int(np.count_nonzero(color_mask)) if DEBUG_SNAPSHOTS else 0
+	color_mask = _drop_large_blobs(color_mask, FLOAT_MAX_BLOB_SIZE)
+	if DEBUG_SNAPSHOTS:
+		_debug('gate: color mask after blanking ' + str(len(ui_boxes)) + ' UI box(es) = ' + str(after_ui) + ' px, after dropping blobs over '
+			+ str(FLOAT_MAX_BLOB_SIZE) + 'px = ' + str(int(np.count_nonzero(color_mask))) + ' px')
+	return color_mask
 
 
 def _load_templates():
-	"""[(path, grayscale image)] for every template on disk, re-reading a file only when
-	it has changed since the last call."""
+	"""[(path, grayscale image)] for every template on disk."""
 	templates = []
 	for path in sorted(glob.glob(FLOAT_TEMPLATE_GLOB)):
-		try:
-			mtime = os.path.getmtime(path)
-		except OSError:
-			continue
-		cached = _template_cache.get(path)
-		if cached is None or cached[0] != mtime:
-			cached = _template_cache[path] = (mtime, cv2.imread(path, 0))
-		if cached[1] is not None:
-			templates.append((path, cached[1]))
+		template = cv2.imread(path, 0)
+		if template is not None:
+			templates.append((path, template))
 	return templates
 
 
@@ -351,8 +348,17 @@ def _match_templates(search_gray: np.ndarray, color_mask: np.ndarray, ui_boxes):
 	gated: Optional[_Match] = None
 	raw: Optional[_Match] = None
 	densities = {}   # same-size templates share one density map
-	for template_path, template in _load_templates():
+	templates = _load_templates()
+	_debug('templates: ' + str(len(templates)) + ' loaded, search band ' + str(search_gray.shape[1]) + 'x' + str(search_gray.shape[0]))
+	if not templates:
+		print('No usable float templates matching ' + FLOAT_TEMPLATE_GLOB + ' - nothing to match against')
+	for template_path, template in templates:
 		th, tw = template.shape[:2]
+		if th > search_gray.shape[0] or tw > search_gray.shape[1]:
+			# A window shrunk (or minimized) so far that the search band is smaller than the
+			# template can't contain the float; matchTemplate would raise instead of scoring.
+			_debug('match: ' + template_path + ' (' + str(tw) + 'x' + str(th) + ') skipped - larger than the search band')
+			continue
 		result = cv2.matchTemplate(search_gray, template, cv2.TM_CCOEFF_NORMED)
 
 		rh, rw = result.shape
@@ -373,6 +379,8 @@ def _match_templates(search_gray: np.ndarray, color_mask: np.ndarray, ui_boxes):
 		result[densities[(tw, th)][:rh, :rw] < FLOAT_MIN_COLOR_PIXELS] = -1
 
 		_, val, _, loc = cv2.minMaxLoc(result)
+		_debug('match: ' + template_path + ' (' + str(tw) + 'x' + str(th) + ') raw ' + str(round(raw_val, 3)) + ' at ' + str(raw_loc)
+			+ ', with color gate ' + str(round(val, 3)) + ' at ' + str(loc))
 		if gated is None or val > gated.score:
 			gated = _Match(val, loc, (tw, th), template_path)
 	return gated, raw
@@ -390,11 +398,17 @@ def _pick_match(gated: Optional[_Match], raw: Optional[_Match]) -> Optional[_Mat
 	# trusting the gate and use the grayscale shape match alone. A colorless frame
 	# (login screen) is also gated to nothing, but its ungated score is below threshold too.
 	best = gated
+	fell_back = False
 	if raw is not None and raw.score > FLOAT_MATCH_THRESHOLD \
 			and (best is None or best.score <= FLOAT_MATCH_THRESHOLD):
 		best = raw
+		fell_back = True
 	if best is None or best.score <= FLOAT_MATCH_THRESHOLD:
+		_debug('pick: nothing above threshold ' + str(FLOAT_MATCH_THRESHOLD) + ' (gated '
+			+ (str(round(gated.score, 3)) if gated else 'none') + ', raw ' + (str(round(raw.score, 3)) if raw else 'none') + ') - not found')
 		return None
+	_debug('pick: ' + ('gate found nothing above ' + str(FLOAT_MATCH_THRESHOLD) + ' - using the ungated shape match ' if fell_back else 'color-gated match ')
+		+ best.template + ' score ' + str(round(best.score, 3)) + ' at ' + str(best.loc))
 	return best
 
 
@@ -415,11 +429,14 @@ def _click_point(img_bgr: np.ndarray, match: _Match, bounds):
 	pad_bottom = int(th * CLICK_SEARCH_PADDING_BOTTOM_RATIO)
 	x0, y0 = max(0, tl[0] - pad_x), max(0, tl[1] - pad_top)
 	x1, y1 = min(w, tl[0] + tw + pad_x), min(h, tl[1] + th + pad_bottom)
+	_debug('click: searching for the base color in region (' + str(x0) + ',' + str(y0) + ')-(' + str(x1) + ',' + str(y1) + ')')
 	point = _float_click_point(img_bgr[y0:y1, x0:x1])
 	if point is not None:
+		_debug('click: using the base color centroid ' + str((round(x0 + point[0], 1), round(y0 + point[1], 1))))
 		return x0 + point[0], y0 + point[1]
 
 	fallback_point = (tl[0] + tw / 2, tl[1] + th * FALLBACK_VERTICAL_BIAS)
+	_debug('click: using the matched box\'s center, ' + str(FALLBACK_VERTICAL_BIAS) + ' of the way down: ' + str((round(fallback_point[0], 1), round(fallback_point[1], 1))))
 	_save_fallback_debug_snapshot(img_bgr, tl, match.size, fallback_point)
 	return fallback_point
 
@@ -441,15 +458,23 @@ def find_float(screenshot_path):
 	h, w = img_bgr.shape[:2]
 	bounds = _search_bounds(w, h)
 	x0, y0, x1, y1 = bounds
+	_debug('start: ' + screenshot_path + ' is ' + str(w) + 'x' + str(h) + ', search band x ' + str(x0) + '-' + str(x1) + ' y ' + str(y0) + '-' + str(y1))
 	# noinspection PyTypeChecker
-	search_gray: np.ndarray = cv2.cvtColor(img_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+	search_gray: np.ndarray = cv2.cvtColor(img_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY) if x1 > x0 and y1 > y0 else None
+	if search_gray is None:
+		_debug('end: the search band is empty (degenerate screenshot) - not found')
+		return None   # a degenerate (e.g. minimized-window) screenshot has no search band at all
 
 	ui_boxes = _ui_boxes(w, h, bounds)
+	_debug('ui: excluding ' + str(len(ui_boxes)) + ' box(es) inside the band: ' + str(ui_boxes))
 	color_mask = _build_color_mask(img_bgr, ui_boxes, bounds)
 	gated, raw = _match_templates(search_gray, color_mask, ui_boxes)
 	match = _pick_match(gated, raw)
 	if match is None:
+		_debug('end: float not found')
 		return None
 
 	print('Matched ' + match.template + ' (score ' + str(round(match.score, 3)) + ')')
-	return _click_point(img_bgr, match, bounds)
+	point = _click_point(img_bgr, match, bounds)
+	_debug('end: click point ' + str((round(point[0], 1), round(point[1], 1))))
+	return point

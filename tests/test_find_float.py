@@ -284,3 +284,76 @@ def test_adaptive_color_mask_baseline_ignores_ui_boxes():
 
 	assert int((with_ui[300:310, 400:440] > 0).sum()) == 0            # gate blinded by the frame
 	assert int((without_ui[300:310, 400:440] > 0).sum()) == 40 * 10   # float survives
+
+
+@pytest.mark.parametrize('shape', [(1, 1), (3, 3), (60, 100), (200, 300), (300, 400)])
+def test_find_float_treats_a_screenshot_too_small_for_the_templates_as_not_found(tmp_path, shape):
+	"""A minimized/shrunk window gives a search band smaller than the templates (or no band at
+	all). That must read as "not found", not raise and take the whole fishing loop down with it."""
+	path = tmp_path / 'tiny.png'
+	cv2.imwrite(str(path), np.random.default_rng(0).integers(0, 255, (*shape, 3), dtype=np.uint8))
+
+	assert find_float(str(path)) is None
+
+
+def test_find_float_says_so_when_there_are_no_templates(tmp_path, monkeypatch, capsys):
+	monkeypatch.setattr('float_detector.FLOAT_TEMPLATE_GLOB', str(tmp_path / 'nothing_*.png'))
+
+	assert find_float(os.path.join(FIXTURE_DIR, 'dim_night_float.png')) is None
+	assert 'No usable float templates' in capsys.readouterr().out
+
+
+def _debug_lines(capsys):
+	return [line for line in capsys.readouterr().out.splitlines() if line.startswith('[float] ')]
+
+
+def test_no_trace_lines_unless_debug_is_on(capsys):
+	find_float(os.path.join(FIXTURE_DIR, 'dim_night_float.png'))
+
+	assert _debug_lines(capsys) == []
+
+
+def test_debug_traces_every_step_of_a_color_matched_detection(capsys, monkeypatch, tmp_path):
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOT_DIR', str(tmp_path))
+
+	find_float(os.path.join(FIXTURE_DIR, 'dim_night_float.png'))
+
+	lines = '\n'.join(_debug_lines(capsys))
+	for step in ('start:', 'ui: excluding 2 box(es)', 'gate: water baseline', 'gate: color mask after blanking', 'templates:',
+				 'match: var/fishing_float_1.png', 'pick: color-gated match', 'click: base color found', 'click: using the base color centroid', 'end: click point'):
+		assert step in lines, step
+
+
+def test_debug_says_why_the_click_point_fell_back(capsys, monkeypatch, tmp_path):
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOT_DIR', str(tmp_path))
+
+	find_float(os.path.join(FIXTURE_DIR, 'warm_water_gate_click_noise.png'))
+
+	lines = '\n'.join(_debug_lines(capsys))
+	assert 'click: base color not found (largest blob' in lines
+	assert "click: using the matched box's center" in lines
+	assert os.listdir(tmp_path)   # the annotated fallback snapshot still gets saved
+
+
+def test_debug_says_why_nothing_was_found(capsys, monkeypatch, tmp_path):
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
+	path = tmp_path / 'flat.png'
+	cv2.imwrite(str(path), np.full((1050, 1893, 3), 120, dtype=np.uint8))
+
+	assert find_float(str(path)) is None
+
+	lines = '\n'.join(_debug_lines(capsys))
+	assert 'pick: nothing above threshold' in lines
+	assert 'end: float not found' in lines
+
+
+def test_debug_says_when_the_screenshot_has_no_search_band(capsys, monkeypatch, tmp_path):
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
+	path = tmp_path / 'tiny.png'
+	cv2.imwrite(str(path), np.zeros((1, 1, 3), dtype=np.uint8))
+
+	assert find_float(str(path)) is None
+
+	assert 'search band is empty' in '\n'.join(_debug_lines(capsys))
