@@ -357,3 +357,37 @@ def test_debug_says_when_the_screenshot_has_no_search_band(capsys, monkeypatch, 
 	assert find_float(str(path)) is None
 
 	assert 'search band is empty' in '\n'.join(_debug_lines(capsys))
+
+
+def test_debug_says_no_position_passed_the_color_gate_instead_of_a_fake_location(capsys, monkeypatch, tmp_path):
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOT_DIR', str(tmp_path))
+	frame = cv2.imread(os.path.join(FIXTURE_DIR, 'dim_night_float.png'))
+	frame[695 - 90:695 + 90, 1243 - 90:1243 + 90] = frame[695 - 90:695 + 90, 1243 - 270:1243 - 90]   # erase the float: clone water over it
+	path = tmp_path / 'no_float.png'
+	cv2.imwrite(str(path), frame)
+
+	find_float(str(path))
+
+	lines = '\n'.join(_debug_lines(capsys))
+	assert 'no position had enough float-colored pixels' in lines
+	assert 'with color gate -1.0' not in lines
+
+
+def test_debug_says_when_ui_exclusion_removed_a_templates_best_spot(capsys, monkeypatch, tmp_path):
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
+
+	find_float(_frame_with_float_at(790, 1070, tmp_path))   # a perfect match sitting inside a UI box
+
+	assert 'UI exclusion removed its best spot' in '\n'.join(_debug_lines(capsys))
+
+
+def test_debug_lists_the_blobs_the_gate_dropped(capsys, monkeypatch):
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
+	hsv = _water_hsv()
+	hsv[100:110, 50:300, 1] = 200   # 250x10 structure, over FLOAT_MAX_BLOB_SIZE
+	bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+	_build_color_mask(bgr, [], (0, 0, hsv.shape[1], hsv.shape[0]))
+
+	assert 'after dropping 1 blob(s) over 200px [(250, 10)]' in '\n'.join(_debug_lines(capsys))

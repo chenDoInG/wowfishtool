@@ -321,11 +321,16 @@ def _build_color_mask(img_bgr: np.ndarray, ui_boxes, bounds):
 	# damage before this exclusion ever gets a chance to run.
 	for bx0, by0, bx1, by1 in ui_boxes:
 		color_mask[by0:by1, bx0:bx1] = 0
-	after_ui = int(np.count_nonzero(color_mask)) if DEBUG_SNAPSHOTS else 0
+	if DEBUG_SNAPSHOTS:
+		after_ui = int(np.count_nonzero(color_mask))
+		_, _, stats, _ = cv2.connectedComponentsWithStats(color_mask, connectivity=8)
+		dropped = [(int(w), int(h)) for w, h in zip(stats[1:, cv2.CC_STAT_WIDTH], stats[1:, cv2.CC_STAT_HEIGHT])
+				   if w > FLOAT_MAX_BLOB_SIZE or h > FLOAT_MAX_BLOB_SIZE]
 	color_mask = _drop_large_blobs(color_mask, FLOAT_MAX_BLOB_SIZE)
 	if DEBUG_SNAPSHOTS:
-		_debug('gate: color mask after blanking ' + str(len(ui_boxes)) + ' UI box(es) = ' + str(after_ui) + ' px, after dropping blobs over '
-			+ str(FLOAT_MAX_BLOB_SIZE) + 'px = ' + str(int(np.count_nonzero(color_mask))) + ' px')
+		_debug('gate: color mask after blanking ' + str(len(ui_boxes)) + ' UI box(es) = ' + str(after_ui) + ' px, after dropping '
+			+ str(len(dropped)) + ' blob(s) over ' + str(FLOAT_MAX_BLOB_SIZE) + 'px' + (' ' + str(dropped[:5]) if dropped else '')
+			+ ' = ' + str(int(np.count_nonzero(color_mask))) + ' px')
 	return color_mask
 
 
@@ -349,7 +354,7 @@ def _match_templates(search_gray: np.ndarray, color_mask: np.ndarray, ui_boxes):
 	raw: Optional[_Match] = None
 	densities = {}   # same-size templates share one density map
 	templates = _load_templates()
-	_debug('templates: ' + str(len(templates)) + ' loaded, search band ' + str(search_gray.shape[1]) + 'x' + str(search_gray.shape[0]))
+	_debug('templates: ' + str(len(templates)) + ' loaded (scores below are after UI exclusion), search band ' + str(search_gray.shape[1]) + 'x' + str(search_gray.shape[0]))
 	if not templates:
 		print('No usable float templates matching ' + FLOAT_TEMPLATE_GLOB + ' - nothing to match against')
 	for template_path, template in templates:
@@ -362,11 +367,16 @@ def _match_templates(search_gray: np.ndarray, color_mask: np.ndarray, ui_boxes):
 		result = cv2.matchTemplate(search_gray, template, cv2.TM_CCOEFF_NORMED)
 
 		rh, rw = result.shape
+		if DEBUG_SNAPSHOTS and ui_boxes:
+			_, before_val, _, before_loc = cv2.minMaxLoc(result)
 		for bx0, by0, bx1, by1 in ui_boxes:
 			# result[y, x] scores the window anchored at (x, y); its center is (x + tw/2, y + th/2)
 			result[max(0, by0 - th // 2):max(0, by1 - th // 2), max(0, bx0 - tw // 2):max(0, bx1 - tw // 2)] = -1
 
 		_, raw_val, _, raw_loc = cv2.minMaxLoc(result)
+		if DEBUG_SNAPSHOTS and ui_boxes and before_loc != raw_loc:
+			_debug('match: ' + template_path + ' UI exclusion removed its best spot ' + str(before_loc) + ' (score ' + str(round(before_val, 3))
+				+ ', window centered in a UI box); next best is ' + str(raw_loc) + ' (' + str(round(raw_val, 3)) + ')')
 		if raw is None or raw_val > raw.score:
 			raw = _Match(raw_val, raw_loc, (tw, th), template_path)
 
@@ -380,7 +390,7 @@ def _match_templates(search_gray: np.ndarray, color_mask: np.ndarray, ui_boxes):
 
 		_, val, _, loc = cv2.minMaxLoc(result)
 		_debug('match: ' + template_path + ' (' + str(tw) + 'x' + str(th) + ') raw ' + str(round(raw_val, 3)) + ' at ' + str(raw_loc)
-			+ ', with color gate ' + str(round(val, 3)) + ' at ' + str(loc))
+			+ ', with color gate ' + (str(round(val, 3)) + ' at ' + str(loc) if val > -1 else 'no position had enough float-colored pixels'))
 		if gated is None or val > gated.score:
 			gated = _Match(val, loc, (tw, th), template_path)
 	return gated, raw
