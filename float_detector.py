@@ -18,6 +18,7 @@ Coordinates are reported in the original screenshot's pixels. The history behind
 the commit messages and README; the comments here say what a constant is for and what it was measured on.
 """
 import glob
+import math
 import os
 import time
 from typing import Dict, NamedTuple, Optional
@@ -67,12 +68,29 @@ FLOAT_BASE_COLOR_RANGES = (
 	((35, 25, 25), (95, 120, 200)),    # dark, desaturated green
 )
 FLOAT_MIN_BASE_BLOB_AREA = 30        # the click point needs one solid base blob this big, not scattered flecks
+FLOAT_MAX_BASE_BLOB_SHARE = 0.5      # the click point's base blob must not fill its search region: a real base is 1-9% of it, scenery 77-95%
+FLOAT_MAX_BASE_SCENE_SHARE = 0.15    # base color is ignored as evidence when this much of the whole band falls inside its ranges:
+# then the water or terrain shares its hue and the ranges say nothing about where the float is. Measured on 14 scenes: 0-4.8%
+# where it is informative, 21.7-88.2% where it is not (a daytime sea, a warm dusk, teal shallows).
 
 # Grayscale windows flatter than this are not treated as a float: featureless water still correlates at 0.6-0.7.
 # Windows on empty water measured a standard deviation of 0.2-4.1, real float windows 6.0 and up. The exception is a
 # float still fading in after the cast (std 3.0-4.7 on 3 of 5 measured): it is excluded until it has fully appeared,
 # so the caller's retry finds it a moment later. The floor sits in the gap and is thin on both sides.
 FLOAT_MIN_TEXTURE = 6
+
+# Evidence 3, agreement between templates: a real float is matched by several differently sized templates at the same
+# place, while a rippled surface usually matches each of them somewhere else. FLOAT_MIN_AGREEING_TEMPLATES templates whose
+# best windows lie within FLOAT_AGREEMENT_RADIUS px of each other, each clearing FLOAT_MATCH_THRESHOLD, back a candidate with
+# no color at all - what a daytime sea whose water shares the base's hue leaves, where the real float (0.55-0.59, three
+# templates agreeing) had no color evidence and the "evidence" pointed at a cliff (0.41). Measured: on all 11 real-float
+# images the largest agreeing group sits on the float; on empty water it reached 3 in 1 of 20 synthetic frames, so it
+# ranks below specific base color.
+FLOAT_MIN_AGREEING_TEMPLATES = 3
+FLOAT_MIN_AGREEING_SHARE = 0.4   # ... and at least this share of the templates in play, so that adding templates (the README tells you to)
+# raises the bar instead of making agreement easier. With the 7 templates measured this is the same 3 (ceil(0.4 * 7)); at 4 of 7 it would
+# have found only 18% of the real floats, and with fewer templates agreement almost never fires (6: 55%, 5: 31%, 4: 14%).
+FLOAT_AGREEMENT_RADIUS = 45
 
 # Click point: look for the base in the match's box padded down and sideways (never up: the feather is there),
 # else click FALLBACK_VERTICAL_BIAS of the way down the box - the base sits below the feather that pulls the box's
@@ -96,11 +114,13 @@ DEBUG_SNAPSHOT_DIR = 'debug'   # kept out of var/, which holds the bot's real ru
 
 # ------------------------------------------------------------------------------ result types
 
-# The kinds of color evidence, strongest first. A window is "supported" by a kind when it holds at least
-# FLOAT_MIN_COLOR_PIXELS pixels of it.
+# The kinds of evidence, strongest first. A window is "supported" by a color kind when it holds at least
+# FLOAT_MIN_COLOR_PIXELS pixels of it; EVIDENCE_AGREEMENT needs no color (see FLOAT_MIN_AGREEING_TEMPLATES) and ranks
+# last: it is the one with no independent physical signal behind it.
 EVIDENCE_GATE = 'color-gated'
 EVIDENCE_BASE = 'base-colored'
-EVIDENCE_PRIORITY = (EVIDENCE_GATE, EVIDENCE_BASE)
+EVIDENCE_AGREEMENT = 'template-agreement'
+EVIDENCE_PRIORITY = (EVIDENCE_GATE, EVIDENCE_BASE, EVIDENCE_AGREEMENT)
 
 
 class Candidate(NamedTuple):
@@ -108,15 +128,22 @@ class Candidate(NamedTuple):
 	loc: tuple       # top-left, in search-band coordinates
 	size: tuple      # (width, height) of the template
 	template: str
-	evidence: str    # the kind of color evidence backing the window
+	evidence: str    # the kind of evidence backing the window
 
 
 class Detection(NamedTuple):
 	point: tuple        # (x, y) to click, in the screenshot's own pixels
-	confidence: str     # the evidence that decided: EVIDENCE_GATE (strong) or EVIDENCE_BASE
+	confidence: str     # the evidence that decided: one of EVIDENCE_PRIORITY, strongest first
 	score: float
 	template: str
 	on_base_color: bool  # the click point is the base's color centroid, not the match's geometric center
+	corroborated_by: tuple = ()   # the other kinds of evidence that independently point at the same place
+
+	@property
+	def corroborated(self):
+		"""Whether a second, independent kind of evidence backs the place. Real floats usually have one (9 of 11
+		measured); every false positive measured had none. A pick without one is low confidence."""
+		return len(self.corroborated_by) > 0
 
 
 # ------------------------------------------------------------------------------ helpers
@@ -261,10 +288,15 @@ def _base_range_mask(hsv: np.ndarray):
 
 
 def _base_color_mask(hsv_band: np.ndarray, ui_boxes):
-	"""Evidence 2 over the band: base-colored pixels, UI frames blanked, oversized blobs (water or scenery
-	that shares the hue) dropped."""
+	"""Evidence 2 over the band: base-colored pixels, UI frames blanked, oversized blobs dropped. Empty when the
+	scene floods the ranges (FLOAT_MAX_BASE_SCENE_SHARE): a color that holds nearly everywhere locates nothing, and
+	filtering windows one by one would only leave the wrong ones - so the whole kind steps aside."""
 	mask = _base_range_mask(hsv_band)
 	_blank_ui(mask, ui_boxes)
+	scene_share = np.count_nonzero(mask) / mask.size
+	if scene_share > FLOAT_MAX_BASE_SCENE_SHARE:
+		_debug('base color: ' + str(round(100 * scene_share)) + '% of the band is inside the base color ranges - the scene shares the hue, ignoring it as evidence')
+		return np.zeros_like(mask)
 	mask = _drop_large_blobs(mask, FLOAT_MAX_BLOB_SIZE)
 	_debug('base color: ' + str(int(np.count_nonzero(mask))) + ' px in the band inside the base color ranges')
 	return mask
@@ -280,6 +312,7 @@ def _find_candidates(search_gray: np.ndarray, evidence_masks: Dict[str, np.ndarr
 	contender. (Picking the best window overall and asking afterwards would lose a real float that is not the
 	best-correlating spot, which on water it usually is not.)"""
 	best: Dict[str, Optional[Candidate]] = {evidence: None for evidence in EVIDENCE_PRIORITY}
+	shape_bests = []   # each template's best window by shape alone (after exclusions), for the agreement evidence
 	densities = {}   # (evidence, window size) -> density map; same-size templates share one
 	textures = {}    # window size -> texture map
 	templates = _load_templates()
@@ -309,7 +342,8 @@ def _find_candidates(search_gray: np.ndarray, evidence_masks: Dict[str, np.ndarr
 			textures[(tw, th)] = _box_texture(search_gray, (tw, th))
 		result[textures[(tw, th)][:rh, :rw] < FLOAT_MIN_TEXTURE] = -1
 
-		_, shape_val, _, shape_loc = cv2.minMaxLoc(result)   # reported only: shape alone never decides
+		_, shape_val, _, shape_loc = cv2.minMaxLoc(result)
+		shape_bests.append(Candidate(shape_val, shape_loc, (tw, th), template_path, EVIDENCE_AGREEMENT))
 		if DEBUG_SNAPSHOTS and shape_loc != after_ui_loc:
 			_debug('match: ' + template_path + ' texture floor (std ' + str(FLOAT_MIN_TEXTURE) + ') removed its best spot ' + str(after_ui_loc)
 				+ ' (score ' + str(round(after_ui_val, 3)) + ', a nearly featureless window); next best is ' + str(shape_loc) + ' (' + str(round(shape_val, 3)) + ')')
@@ -325,7 +359,30 @@ def _find_candidates(search_gray: np.ndarray, evidence_masks: Dict[str, np.ndarr
 				best[evidence] = Candidate(val, loc, (tw, th), template_path, evidence)
 			line += ', ' + label + ' ' + (str(round(val, 3)) + ' at ' + str(loc) if val > -1 else 'no position had enough ' + empty + ' pixels')
 		_debug(line)
+	best[EVIDENCE_AGREEMENT] = _agreeing_candidate(shape_bests)
 	return best
+
+
+def _agreeing_candidate(shape_bests):
+	"""The best-scoring member of the largest group of templates whose best windows agree on where the float is,
+	or None when no group is big enough: at least FLOAT_MIN_AGREEING_TEMPLATES templates and at least
+	FLOAT_MIN_AGREEING_SHARE of all the templates that were matched."""
+	def center(c):
+		return c.loc[0] + c.size[0] / 2, c.loc[1] + c.size[1] / 2
+	group_of = []
+	for c in shape_bests:
+		cx, cy = center(c)
+		group_of.append([m for m in shape_bests if m.score > FLOAT_MATCH_THRESHOLD and c.score > FLOAT_MATCH_THRESHOLD
+						 and (center(m)[0] - cx) ** 2 + (center(m)[1] - cy) ** 2 <= FLOAT_AGREEMENT_RADIUS ** 2])
+	group = max(group_of, key=lambda g: (len(g), max((m.score for m in g), default=-1)), default=[])
+	needed = max(FLOAT_MIN_AGREEING_TEMPLATES, math.ceil(round(FLOAT_MIN_AGREEING_SHARE * len(shape_bests), 9)))
+	if len(group) < needed:
+		_debug('agreement: no ' + str(needed) + ' of ' + str(len(shape_bests)) + ' templates agree on a place (largest group ' + str(len(group)) + ')')
+		return None
+	winner = max(group, key=lambda m: m.score)
+	_debug('agreement: ' + str(len(group)) + ' templates agree near ' + str(tuple(round(v) for v in center(winner))) + ' - best ' + winner.template
+		+ ' ' + str(round(winner.score, 3)))
+	return winner
 
 
 # ------------------------------------------------------------------------------ 4. decide
@@ -341,8 +398,11 @@ def _decide(candidates: Dict[str, Optional[Candidate]]) -> Optional[Candidate]:
 	for evidence in EVIDENCE_PRIORITY:
 		candidate = candidates.get(evidence)
 		if candidate is not None and candidate.score > FLOAT_MATCH_THRESHOLD:
-			_debug('pick: ' + (evidence + ' match ' if evidence == EVIDENCE_GATE else 'gate found nothing above ' + str(FLOAT_MATCH_THRESHOLD)
-				+ ' - using the shape match among base-colored windows ') + candidate.template + ' score ' + str(round(candidate.score, 3)) + ' at ' + str(candidate.loc))
+			_debug('pick: ' + {EVIDENCE_GATE: 'color-gated match ',
+							   EVIDENCE_BASE: 'gate found nothing above ' + str(FLOAT_MATCH_THRESHOLD)
+							   + ' - using the shape match among base-colored windows ',
+							   EVIDENCE_AGREEMENT: 'no color evidence - using the window the templates agree on '}[evidence]
+				+ candidate.template + ' score ' + str(round(candidate.score, 3)) + ' at ' + str(candidate.loc))
 			return candidate
 	scores = ', '.join(evidence + ' ' + (str(round(candidates[evidence].score, 3)) if candidates.get(evidence) and candidates[evidence].score > -1 else 'none')
 					   for evidence in EVIDENCE_PRIORITY)
@@ -350,34 +410,64 @@ def _decide(candidates: Dict[str, Optional[Candidate]]) -> Optional[Candidate]:
 	return None
 
 
+def _corroborating_evidence(chosen: Candidate, candidates: Dict[str, Optional[Candidate]]):
+	"""The other kinds of evidence whose best candidate clears the threshold within FLOAT_AGREEMENT_RADIUS px of
+	the chosen one: independent signals (relative saturation, base color, agreement between templates) that land
+	on the same place are far stronger than the same three kinds scattered over the band."""
+	def center(c):
+		return c.loc[0] + c.size[0] / 2, c.loc[1] + c.size[1] / 2
+	cx, cy = center(chosen)
+	return tuple(evidence for evidence in EVIDENCE_PRIORITY
+				 if evidence != chosen.evidence and candidates.get(evidence) is not None
+				 and candidates[evidence].score > FLOAT_MATCH_THRESHOLD
+				 and (center(candidates[evidence])[0] - cx) ** 2 + (center(candidates[evidence])[1] - cy) ** 2 <= FLOAT_AGREEMENT_RADIUS ** 2)
+
+
 # ------------------------------------------------------------------------------ 5. click point
 
 def _base_click_point(hsv_region: np.ndarray):
 	"""Centroid of the bobber base's color within `hsv_region` (region coordinates), or None when there is no
-	single solid base-colored blob to trust - scattered flecks that sum to a plausible total are what water
-	sharing the base's hue leaves behind, so the biggest component alone must clear the floor."""
-	mask, largest_component = _drop_small_blobs_stats(_base_range_mask(hsv_region), FLOAT_MAX_BLOB_SIZE)
-	if largest_component < FLOAT_MIN_BASE_BLOB_AREA:
-		_debug('click: base color not found (largest blob ' + str(largest_component) + ' px, need ' + str(FLOAT_MIN_BASE_BLOB_AREA) + ')')
-		return None
-	moments = cv2.moments(mask, binaryImage=True)
-	_debug('click: base color found (largest blob ' + str(largest_component) + ' px, ' + str(int(moments['m00'])) + ' px total)')
-	return moments['m10'] / moments['m00'], moments['m01'] / moments['m00']
+	single solid base-colored blob to trust. Each FLOAT_BASE_COLOR_RANGES range is tried on its own, in order: the
+	union floods when one range matches the water (it fuses base and water into a blob that is dropped as scenery),
+	while the range that fits this lighting alone leaves the base as one compact blob. A blob qualifies when it clears
+	the floor (scattered flecks that sum to a plausible total are what water sharing the hue leaves behind) and does
+	not fill the region (that is a surface, not a base)."""
+	rejections = []
+	for lo, hi in FLOAT_BASE_COLOR_RANGES:
+		mask = cv2.morphologyEx(cv2.inRange(hsv_region, lo, hi), cv2.MORPH_OPEN, np.ones((2, 2), dtype=np.uint8))
+		mask, largest_component = _drop_small_blobs_stats(mask, FLOAT_MAX_BLOB_SIZE)
+		if largest_component < FLOAT_MIN_BASE_BLOB_AREA:
+			rejections.append(str(largest_component) + ' px')
+		elif largest_component > FLOAT_MAX_BASE_BLOB_SHARE * mask.size:
+			rejections.append(str(largest_component) + ' px = scenery')
+		else:
+			moments = cv2.moments(mask, binaryImage=True)
+			_debug('click: base color found (largest blob ' + str(largest_component) + ' px, ' + str(int(moments['m00'])) + ' px total)')
+			return moments['m10'] / moments['m00'], moments['m01'] / moments['m00']
+	_debug('click: base color not found (largest blob per range: ' + ', '.join(rejections) + '; need ' + str(FLOAT_MIN_BASE_BLOB_AREA) + ' and under ' + str(round(100 * FLOAT_MAX_BASE_BLOB_SHARE)) + '% of the region)')
+	return None
 
 
-def _save_fallback_debug_snapshot(img_bgr: np.ndarray, box_tl, box_size, click_point):
-	"""If DEBUG_SNAPSHOTS is on, save the screenshot with the matched box and click point drawn on it, so a click
-	that fell back to the geometric center can be checked after the fact. No-op otherwise."""
+def _save_debug_snapshot(img_bgr: np.ndarray, box_tl, box_size, click_point, prefix: str, label: str):
+	"""If DEBUG_SNAPSHOTS is on, save the screenshot into DEBUG_SNAPSHOT_DIR with the matched box, the click point and
+	`label` drawn on it, so a pick worth a second look can be checked after the fact. Returns the path, or None."""
 	if not DEBUG_SNAPSHOTS:
-		return
-	os.makedirs(DEBUG_SNAPSHOT_DIR, exist_ok=True)
+		return None
 	tw, th = box_size
 	annotated = img_bgr.copy()
 	cv2.rectangle(annotated, box_tl, (box_tl[0] + tw, box_tl[1] + th), (0, 255, 0), 2)
 	cv2.circle(annotated, (int(click_point[0]), int(click_point[1])), 6, (0, 0, 255), -1)
-	path = os.path.join(DEBUG_SNAPSHOT_DIR, 'fallback_' + str(int(time.time())) + '.png')
-	cv2.imwrite(path, annotated)
-	print('Click point fell back to the matched box\'s center - saved ' + path + ' for review')
+	cv2.putText(annotated, label, (box_tl[0], max(20, box_tl[1] - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+	path = os.path.join(DEBUG_SNAPSHOT_DIR, prefix + '_' + str(int(time.time() * 1000)) + '.png')   # ms: two saves in one second must not overwrite each other
+	try:
+		os.makedirs(DEBUG_SNAPSHOT_DIR, exist_ok=True)
+		if not cv2.imwrite(path, annotated):
+			raise OSError('cv2.imwrite returned False')
+	except (OSError, cv2.error) as error:
+		# a debugging aid must never take detection down: an unwritable folder or a full disk just loses the picture
+		print('Could not save the debug snapshot into ' + DEBUG_SNAPSHOT_DIR + ': ' + str(error))
+		return None
+	return path
 
 
 def _click_point(img_bgr: np.ndarray, hsv: np.ndarray, candidate: Candidate, bounds):
@@ -399,7 +489,6 @@ def _click_point(img_bgr: np.ndarray, hsv: np.ndarray, candidate: Candidate, bou
 
 	fallback_point = (tl[0] + tw / 2, tl[1] + th * FALLBACK_VERTICAL_BIAS)
 	_debug('click: using the matched box\'s center, ' + str(FALLBACK_VERTICAL_BIAS) + ' of the way down: ' + str((round(fallback_point[0], 1), round(fallback_point[1], 1))))
-	_save_fallback_debug_snapshot(img_bgr, tl, candidate.size, fallback_point)
 	return fallback_point, False
 
 
@@ -436,17 +525,34 @@ def find_float_detailed(screenshot_path) -> Optional[Detection]:
 	_debug('ui: excluding ' + str(len(ui_boxes)) + ' box(es) inside the band: ' + str(ui_boxes))
 
 	evidence_masks = {EVIDENCE_GATE: _build_color_mask(hsv_band, ui_boxes), EVIDENCE_BASE: _base_color_mask(hsv_band, ui_boxes)}
-	candidate = _decide(_find_candidates(search_gray, evidence_masks, ui_boxes))
+	candidates = _find_candidates(search_gray, evidence_masks, ui_boxes)
+	candidate = _decide(candidates)
 	if candidate is None:
 		_debug('end: float not found')
 		return None
 
 	point, on_base_color = _click_point(img_bgr, hsv, candidate, bounds)
-	print('Matched ' + candidate.template + ' (score ' + str(round(candidate.score, 3)) + ')')
+	corroborated_by = _corroborating_evidence(candidate, candidates)
+	summary = candidate.evidence + ', ' + ('corroborated by ' + ' + '.join(corroborated_by) if corroborated_by else 'NOT corroborated by any other evidence')
+	print('Matched ' + candidate.template + ' (score ' + str(round(candidate.score, 3)) + ') - ' + summary)
+
+	# Picks that leave the best evidence behind are where the mistakes are: a click that fell back to the box center, or
+	# a match no second kind of evidence backs. Keep a picture of each so they can be reviewed without a live log.
+	box_tl = (candidate.loc[0] + bounds[0], candidate.loc[1] + bounds[1])
+	label = candidate.evidence + ' ' + str(round(candidate.score, 2)) + (' corroborated' if corroborated_by else ' UNCORROBORATED')
+	if not on_base_color:
+		path = _save_debug_snapshot(img_bgr, box_tl, candidate.size, point, 'fallback', label)
+		if path:
+			print('Click point fell back to the matched box\'s center - saved ' + path + ' for review')
+	elif not corroborated_by:
+		path = _save_debug_snapshot(img_bgr, box_tl, candidate.size, point, 'lowconf', label)
+		if path:
+			print('Low confidence (' + summary + ') - saved ' + path + ' for review')
+
 	if scale != 1:
 		point = (point[0] / scale, point[1] / scale)   # back to the original screenshot's pixels
-	_debug('end: click point ' + str((round(point[0], 1), round(point[1], 1))))
-	return Detection(point, candidate.evidence, candidate.score, candidate.template, on_base_color)
+	_debug('end: click point ' + str((round(point[0], 1), round(point[1], 1))) + ' - ' + summary)
+	return Detection(point, candidate.evidence, candidate.score, candidate.template, on_base_color, corroborated_by)
 
 
 def find_float(screenshot_path):

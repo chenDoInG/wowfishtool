@@ -5,15 +5,16 @@ overwritten every time the bot actually runs) with known, visually-verified floa
 positions, so tuning the matching/color-gating constants in float_detector.py later
 can't silently break detection without a test failing.
 """
+import math
 import os
 
 import cv2
 import numpy as np
 import pytest
 
-from float_detector import (EVIDENCE_BASE, EVIDENCE_GATE, FLOAT_MAX_BLOB_SIZE, FLOAT_MIN_TEXTURE, Candidate, _adaptive_color_mask,
-								_base_click_point, _box_texture, _build_color_mask, _decide, _drop_large_blobs, _normalization_scale,
-								find_float, find_float_detailed)
+from float_detector import (EVIDENCE_AGREEMENT, EVIDENCE_BASE, EVIDENCE_GATE, FLOAT_MAX_BLOB_SIZE, FLOAT_MIN_TEXTURE, Candidate,
+								_adaptive_color_mask, _agreeing_candidate, _base_click_point, _base_color_mask, _box_texture, _corroborating_evidence, _build_color_mask, _decide,
+								_drop_large_blobs, _normalization_scale, find_float, find_float_detailed)
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), 'fixtures')
 TOLERANCE_PX = 20
@@ -46,6 +47,9 @@ FLOAT_CASES = [
 	('small_float_on_pale_water.png', (1218, 853), 20, [(1688, 598)],
 	 'dusk water with pale wave crests and a small, dark float (cast far out): by shape alone the best window was '
 	 'a wave crest at (1688, 598), 7 times in 81 casts - the float\'s base is the only base-colored spot in the band'),
+	('daytime_waves_float.png', (1155, 932), 30, [(887, 607)],
+	 'daytime sea whose water is as saturated as the cliffs (gate blind, threshold 199) and whose hue is the base range: '
+	 'color evidence pointed at a cliff (0.41) while the real float scored 0.55-0.59 on three templates that agree on it'),
 	('dim_night_base_color.png', (1355.61, 695.46), TOLERANCE_PX, [],
 	 'dark night base: hue inside the daylight range but S/V far below its floors, so '
 	 'every cast fell back to the geometric center; needs the dim base color range'),
@@ -536,3 +540,179 @@ def test_an_absurdly_thin_screenshot_is_not_found_instead_of_raising(tmp_path):
 	cv2.imwrite(str(path), np.zeros((10, 100000, 3), dtype=np.uint8))
 
 	assert find_float(str(path)) is None
+
+
+def _shape_best(score, x, y, w=65, h=65, name='t.png'):
+	return Candidate(score, (x, y), (w, h), name, EVIDENCE_AGREEMENT)
+
+
+def test_agreeing_candidate_needs_several_templates_at_the_same_place():
+	three = [_shape_best(0.55, 100, 100, 133, 97), _shape_best(0.59, 130, 110), _shape_best(0.40, 120, 105, 73, 58)]
+	assert _agreeing_candidate(three).score == 0.59   # the best member of the group
+	assert _agreeing_candidate(three[:2]) is None     # two templates are not enough
+
+
+def test_agreement_needs_a_share_of_the_templates_not_just_three_when_there_are_many():
+	"""Adding templates must raise the bar: 3 of 10 agreeing is easy by chance, 4 of 10 (40%) is the rule."""
+	def group_of(n, size):
+		return [_shape_best(0.55, 100 + i * 5, 100, name='t%d.png' % i) for i in range(size)] \
+			+ [_shape_best(0.55, 100 + 200 * (i + 1), 100 + 150 * i, name='far%d.png' % i) for i in range(n - size)]
+	assert _agreeing_candidate(group_of(7, 3)) is not None    # 3 of 7: ceil(0.4 * 7) = 3, unchanged from the fixed rule
+	assert _agreeing_candidate(group_of(10, 3)) is None       # 3 of 10 is under 40%
+	assert _agreeing_candidate(group_of(10, 4)) is not None
+	assert _agreeing_candidate(group_of(5, 3)) is not None    # never fewer than 3, never more than 40% of what there is
+
+
+def test_agreeing_candidate_ignores_templates_that_disagree_or_score_too_low():
+	spread = [_shape_best(0.55, 100, 100), _shape_best(0.59, 400, 100), _shape_best(0.50, 100, 400)]
+	assert _agreeing_candidate(spread) is None
+	weak = [_shape_best(0.30, 100, 100), _shape_best(0.30, 110, 100), _shape_best(0.30, 120, 100)]
+	assert _agreeing_candidate(weak) is None
+
+
+def test_decide_ranks_the_gate_then_specific_base_color_then_template_agreement():
+	"""The gate is hue-agnostic; base color that is specific to a small blob has a physical signal behind it; template
+	agreement is shape only, and on rippled water 3 templates occasionally agree on a wave crest."""
+	gate, base, agree = _candidate(0.50, EVIDENCE_GATE), _candidate(0.45, EVIDENCE_BASE), _candidate(0.90, EVIDENCE_AGREEMENT)
+	assert _decide({EVIDENCE_GATE: gate, EVIDENCE_BASE: base, EVIDENCE_AGREEMENT: agree}) is gate
+	assert _decide({EVIDENCE_GATE: None, EVIDENCE_BASE: base, EVIDENCE_AGREEMENT: agree}) is base
+	assert _decide({EVIDENCE_GATE: None, EVIDENCE_BASE: None, EVIDENCE_AGREEMENT: agree}) is agree
+
+
+def test_base_color_steps_aside_when_the_whole_scene_shares_its_hue():
+	"""A daytime sea and a warm dusk fall 84-88% inside the base ranges; where the color is informative it is 0-5%."""
+	flooded = _hsv_patch(66, 46, 38, size=150, canvas=(200, 200))               # 56% of the band inside the ranges, blob under the size cap
+	specific = _hsv_patch(66, 46, 38, size=14, canvas=(200, 200))               # a bobber-sized blob on other water
+
+	assert int(np.count_nonzero(_base_color_mask(flooded, []))) == 0
+	assert int(np.count_nonzero(_base_color_mask(specific, []))) > 0
+
+
+def test_a_scene_that_shares_the_base_hue_falls_back_to_template_agreement_even_with_noise():
+	"""warm_dusk_gate_miss plus noise blinds the gate, and its water is inside the base ranges (84%). Choosing among
+	base-colored windows one by one picked a spot 548 px away; the kind of evidence has to step aside as a whole."""
+	frame = cv2.imread(os.path.join(FIXTURE_DIR, 'warm_dusk_gate_miss.png')).astype(int)
+	noisy = np.clip(frame + np.random.default_rng(0).normal(0, 6, frame.shape), 0, 255).astype(np.uint8)
+	path = os.path.join(FIXTURE_DIR, '..', 'noisy_warm_dusk.tmp.png')
+	cv2.imwrite(path, noisy)
+	try:
+		detection = find_float_detailed(path)
+	finally:
+		os.remove(path)
+
+	assert detection is not None and detection.confidence == EVIDENCE_AGREEMENT
+	assert abs(detection.point[0] - 1438) <= 45 and abs(detection.point[1] - 800) <= 45
+
+
+def test_a_base_blob_that_fills_the_region_is_scenery_not_a_base():
+	"""The daytime sea and its cliffs share the base's hue: 'the base' was 76-90% of the click region. A real base is 1-4%."""
+	assert _base_click_point(_hsv_patch(66, 46, 38, size=55, canvas=(60, 60))) is None
+	assert _base_click_point(_hsv_patch(66, 46, 38, size=12, canvas=(60, 60))) is not None
+
+
+def test_debug_traces_the_agreement_between_templates(capsys, monkeypatch, tmp_path):
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOT_DIR', str(tmp_path))
+
+	detection = find_float_detailed(os.path.join(FIXTURE_DIR, 'daytime_waves_float.png'))
+
+	lines = '\n'.join(_debug_lines(capsys))
+	assert detection.confidence == EVIDENCE_AGREEMENT
+	assert 'agreement: 3 templates agree near' in lines
+	assert 'using the window the templates agree on' in lines
+	assert 'click: base color found' in lines   # the union of ranges floods here; the range that fits the lighting does not
+
+
+def _placed(score, x, y, evidence):
+	return Candidate(score, (x, y), (65, 65), 'template.png', evidence)
+
+
+def test_corroborating_evidence_counts_other_kinds_that_land_on_the_same_place():
+	chosen = _placed(0.50, 100, 100, EVIDENCE_GATE)
+	candidates = {EVIDENCE_GATE: chosen, EVIDENCE_BASE: _placed(0.45, 120, 110, EVIDENCE_BASE),
+				  EVIDENCE_AGREEMENT: _placed(0.60, 400, 100, EVIDENCE_AGREEMENT)}
+
+	assert _corroborating_evidence(chosen, candidates) == (EVIDENCE_BASE,)   # agreement points elsewhere, so it does not count
+
+
+def test_corroborating_evidence_ignores_kinds_below_the_threshold_or_missing():
+	chosen = _placed(0.50, 100, 100, EVIDENCE_BASE)
+	candidates = {EVIDENCE_GATE: _placed(0.20, 100, 100, EVIDENCE_GATE), EVIDENCE_BASE: chosen, EVIDENCE_AGREEMENT: None}
+
+	assert _corroborating_evidence(chosen, candidates) == ()
+
+
+def test_real_floats_are_usually_corroborated_and_the_hard_scenes_are_flagged():
+	"""9 of 11 measured floats had a second independent kind of evidence at the same place; the two that did not are
+	the hardest scenes (dusk water with a faint float, a daytime sea whose water shares the base's hue)."""
+	ship = find_float_detailed(os.path.join(FIXTURE_DIR, 'ship_false_positive.png'))
+	pale = find_float_detailed(os.path.join(FIXTURE_DIR, 'small_float_on_pale_water.png'))
+
+	assert ship.corroborated and set(ship.corroborated_by) == {EVIDENCE_BASE, EVIDENCE_AGREEMENT}
+	assert not pale.corroborated and pale.corroborated_by == ()
+
+
+def _snapshot_names(directory):
+	return sorted(os.path.splitext(name)[0].split('_')[0] for name in os.listdir(directory))
+
+
+def test_a_low_confidence_pick_saves_a_snapshot_and_says_so(capsys, monkeypatch, tmp_path):
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOT_DIR', str(tmp_path))
+
+	find_float(os.path.join(FIXTURE_DIR, 'small_float_on_pale_water.png'))
+
+	assert _snapshot_names(tmp_path) == ['lowconf']
+	out = capsys.readouterr().out
+	assert 'NOT corroborated by any other evidence' in out and 'Low confidence' in out
+
+
+def test_a_corroborated_pick_on_the_base_color_saves_nothing(monkeypatch, tmp_path):
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOT_DIR', str(tmp_path))
+
+	find_float(os.path.join(FIXTURE_DIR, 'ship_false_positive.png'))
+
+	assert os.listdir(tmp_path) == []
+
+
+def test_a_fallback_click_saves_one_fallback_snapshot_even_when_it_is_also_uncorroborated(monkeypatch, tmp_path):
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOT_DIR', str(tmp_path))
+
+	monkeypatch.setattr('float_detector._base_click_point', lambda hsv_region: None)   # force the box-center click
+	find_float(os.path.join(FIXTURE_DIR, 'daytime_waves_float.png'))   # and nothing corroborates the pick
+
+	assert _snapshot_names(tmp_path) == ['fallback']
+
+
+def test_snapshots_saved_within_one_second_do_not_overwrite_each_other(monkeypatch, tmp_path):
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOT_DIR', str(tmp_path))
+
+	for _ in range(3):
+		find_float(os.path.join(FIXTURE_DIR, 'small_float_on_pale_water.png'))
+
+	assert len(os.listdir(tmp_path)) == 3
+
+
+def test_an_unwritable_snapshot_folder_loses_the_picture_not_the_detection(capsys, monkeypatch, tmp_path):
+	"""A debugging aid must never take detection down with it: the folder cannot be created under a plain file."""
+	blocker = tmp_path / 'blocker'
+	blocker.write_text('x')
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOT_DIR', str(blocker / 'debug'))
+
+	place = find_float(os.path.join(FIXTURE_DIR, 'small_float_on_pale_water.png'))   # a low-confidence pick, so it tries to save
+
+	assert place is not None
+	assert 'Could not save the debug snapshot' in capsys.readouterr().out
+
+
+def test_the_click_finds_the_base_where_one_range_floods_with_the_water():
+	"""Daytime waves: one base range matches all the water, so the union is a single oversized blob. Each range is
+	judged on its own, so the base is still found and the click lands on it instead of the box center."""
+	detection = find_float_detailed(os.path.join(FIXTURE_DIR, 'daytime_waves_float.png'))
+
+	assert detection.on_base_color
+	assert math.hypot(detection.point[0] - 1155, detection.point[1] - 932) < 10
