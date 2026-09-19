@@ -528,3 +528,11 @@ def test_find_float_is_the_point_of_find_float_detailed():
 
 	assert find_float(path) == find_float_detailed(path).point
 	assert find_float_detailed(os.path.join(FIXTURE_DIR, 'no_float_dark_water.png')) is None
+
+
+def test_an_absurdly_thin_screenshot_is_not_found_instead_of_raising(tmp_path):
+	"""100000x10 would resize to a zero-height image; cv2.resize raised and took the fishing loop down with it."""
+	path = tmp_path / 'thin.png'
+	cv2.imwrite(str(path), np.zeros((10, 100000, 3), dtype=np.uint8))
+
+	assert find_float(str(path)) is None

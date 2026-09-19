@@ -68,8 +68,10 @@ FLOAT_BASE_COLOR_RANGES = (
 )
 FLOAT_MIN_BASE_BLOB_AREA = 30        # the click point needs one solid base blob this big, not scattered flecks
 
-# Grayscale windows flatter than this cannot be a float: featureless water still correlates at 0.6-0.7. Empty water
-# measured 0.2-4.1, real float windows 6.0 and up (faint, fading-in floats sit at the bottom of that range).
+# Grayscale windows flatter than this are not treated as a float: featureless water still correlates at 0.6-0.7.
+# Windows on empty water measured a standard deviation of 0.2-4.1, real float windows 6.0 and up. The exception is a
+# float still fading in after the cast (std 3.0-4.7 on 3 of 5 measured): it is excluded until it has fully appeared,
+# so the caller's retry finds it a moment later. The floor sits in the gap and is thin on both sides.
 FLOAT_MIN_TEXTURE = 6
 
 # Click point: look for the base in the match's box padded down and sideways (never up: the feather is there),
@@ -342,7 +344,8 @@ def _decide(candidates: Dict[str, Optional[Candidate]]) -> Optional[Candidate]:
 			_debug('pick: ' + (evidence + ' match ' if evidence == EVIDENCE_GATE else 'gate found nothing above ' + str(FLOAT_MATCH_THRESHOLD)
 				+ ' - using the shape match among base-colored windows ') + candidate.template + ' score ' + str(round(candidate.score, 3)) + ' at ' + str(candidate.loc))
 			return candidate
-	scores = ', '.join(evidence + ' ' + (str(round(candidates[evidence].score, 3)) if candidates.get(evidence) else 'none') for evidence in EVIDENCE_PRIORITY)
+	scores = ', '.join(evidence + ' ' + (str(round(candidates[evidence].score, 3)) if candidates.get(evidence) and candidates[evidence].score > -1 else 'none')
+					   for evidence in EVIDENCE_PRIORITY)
 	_debug('pick: nothing above threshold ' + str(FLOAT_MATCH_THRESHOLD) + ' (' + scores + ') - not found')
 	return None
 
@@ -411,6 +414,9 @@ def find_float_detailed(screenshot_path) -> Optional[Detection]:
 		return None
 	h, w = img_bgr.shape[:2]
 	scale = _normalization_scale(w)
+	if scale != 1 and min(round(w * scale), round(h * scale)) < 1:
+		_debug('end: a ' + str(w) + 'x' + str(h) + ' screenshot would resize to nothing - not found')
+		return None   # an absurd aspect ratio (nothing a game window can produce); cv2.resize would raise
 	if scale != 1:
 		_debug('scale: ' + str(w) + 'px wide is ' + str(round(w / FLOAT_REFERENCE_WIDTH, 2)) + 'x the reference width ' + str(FLOAT_REFERENCE_WIDTH)
 			+ ' - matching on a copy resized by ' + str(round(scale, 2)))
