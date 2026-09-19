@@ -208,7 +208,7 @@ def _saturation_percentile(saturation: np.ndarray, percentile: float):
 	return lo_val + (hi_val - lo_val) * (rank - lo)
 
 
-def _adaptive_color_mask(hsv_region: np.ndarray):
+def _adaptive_color_mask(hsv_region: np.ndarray, ui_boxes=()):
 	"""Pixels distinctly more saturated than this scene's own water, regardless of what
 	hue that happens to be - see the comment on FLOAT_SATURATION_MARGIN above.
 
@@ -217,11 +217,21 @@ def _adaptive_color_mask(hsv_region: np.ndarray):
 	(255) so nothing could ever pass. find_float() handles both the same way: a gate that
 	finds nothing gets no say (see _pick_match()).
 
+	`ui_boxes` (search-band coordinates) are left out of the water baseline: a player frame's
+	solid green/blue bars and gold border are far more saturated than any water, and left in,
+	two of them alone (~2% of the band) drag the 99.5th percentile up to their own level -
+	which raises the threshold past the float and turns the whole gate off.
+
 	Deliberately does NOT drop oversized blobs itself - see the comment in
 	_build_color_mask() where UI_EXCLUDE_REGIONS is blanked out before that happens."""
 	saturation = hsv_region[:, :, 1]
 	value = hsv_region[:, :, 2]
-	water_baseline = _saturation_percentile(saturation, FLOAT_SATURATION_BASELINE_PERCENTILE)
+	water_pixels = np.ones(saturation.shape, dtype=bool)
+	for bx0, by0, bx1, by1 in ui_boxes:
+		water_pixels[by0:by1, bx0:bx1] = False
+	if not water_pixels.any():
+		water_pixels[:] = True
+	water_baseline = _saturation_percentile(saturation[water_pixels], FLOAT_SATURATION_BASELINE_PERCENTILE)
 	threshold = water_baseline + FLOAT_SATURATION_MARGIN
 	return ((saturation > threshold) & (value > FLOAT_MIN_VALUE)).astype(np.uint8) * 255
 
@@ -298,7 +308,7 @@ def _build_color_mask(img_bgr: np.ndarray, ui_boxes, bounds):
 	frames blanked and oversized blobs dropped."""
 	x0, y0, x1, y1 = bounds
 	hsv = cv2.cvtColor(img_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
-	color_mask = _adaptive_color_mask(hsv)
+	color_mask = _adaptive_color_mask(hsv, ui_boxes)
 
 	# Blank out each known UI player-frame's fixed spot (see UI_EXCLUDE_REGIONS above) so
 	# no candidate window anchored there can ever read as float-colored. Done before

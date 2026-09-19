@@ -248,3 +248,39 @@ def test_pick_match_falls_back_to_ungated_only_when_the_gated_one_is_too_weak():
 	gated_ok, raw_higher = _match(0.50), _match(0.90)
 	assert _pick_match(gated_ok, raw_higher) is gated_ok
 	assert _pick_match(None, None) is None
+
+
+# backlit_float.png's UI regions were blacked out in the original capture. A synthetic
+# WoW-style player frame (gold-bordered portrait, made-up name "Testchar", solid green
+# health bar, solid blue mana bar) is painted into each UI_EXCLUDE_REGIONS box, bottom-left
+# and bottom-right, so the exclusion - and the water baseline's handling of UI pixels - has
+# something real to act on. The float's position is unchanged from the black-region original.
+# One fixture is enough: the other blacked-out captures only need to keep finding their float.
+UI_FRAMES_FIXTURE = os.path.join(FIXTURE_DIR, 'backlit_float.png')
+
+
+def test_synthetic_ui_player_frames_really_are_a_distractor(monkeypatch):
+	"""With UI exclusion off, the painted frames must actually win the click - otherwise the
+	FLOAT_CASES rows would pass whether or not the exclusion works."""
+	monkeypatch.setattr('float_detector.UI_EXCLUDE_REGIONS', ())
+
+	x, y = find_float(UI_FRAMES_FIXTURE)
+
+	assert y > 1000   # down in the UI band, not on the water
+
+
+def test_adaptive_color_mask_baseline_ignores_ui_boxes():
+	"""A player frame's solid bars are far more saturated than water. Counted into the water
+	baseline they lift the 99.5th percentile to their own level, the threshold clears the
+	float, and the whole gate goes blind - which real, un-blacked-out UI frames did to a
+	backlit capture before the baseline learned to skip UI_EXCLUDE_REGIONS."""
+	hsv = _water_hsv(saturation=30, value=150)
+	hsv[300:310, 400:440, 1] = 100                   # the float's own pixels, above the water
+	hsv[700:790, 100:400, 1] = 230                   # a UI frame: ~2.4% of the canvas
+	ui_box = (100, 700, 400, 790)
+
+	with_ui = _adaptive_color_mask(hsv)
+	without_ui = _adaptive_color_mask(hsv, [ui_box])
+
+	assert int((with_ui[300:310, 400:440] > 0).sum()) == 0            # gate blinded by the frame
+	assert int((without_ui[300:310, 400:440] > 0).sum()) == 40 * 10   # float survives
