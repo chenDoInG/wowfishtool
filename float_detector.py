@@ -137,6 +137,16 @@ class Detection(NamedTuple):
 
 # ------------------------------------------------------------------------------ helpers
 
+def _center(candidate: Candidate):
+	return candidate.loc[0] + candidate.size[0] / 2, candidate.loc[1] + candidate.size[1] / 2
+
+
+def _same_place(a: Candidate, b: Candidate):
+	"""Whether two candidates' centers lie within FLOAT_AGREEMENT_RADIUS px of each other."""
+	(ax, ay), (bx, by) = _center(a), _center(b)
+	return (ax - bx) ** 2 + (ay - by) ** 2 <= FLOAT_AGREEMENT_RADIUS ** 2
+
+
 def _debug(message):
 	"""Trace line, printed only while DEBUG_SNAPSHOTS is on."""
 	if DEBUG_SNAPSHOTS:
@@ -158,18 +168,21 @@ def _box_density(mask: np.ndarray, window_size):
 	return density / 255.0
 
 
-def _drop_small_blobs_stats(mask: np.ndarray, max_size: int):
-	"""(mask without components wider or taller than `max_size`, area of the biggest one kept or 0)."""
+def _drop_large_blobs_stats(mask: np.ndarray, max_size: int):
+	"""(mask without components wider or taller than `max_size`, area of the biggest one kept or 0,
+	[(width, height)] of those dropped)."""
 	_, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-	keep = (stats[:, cv2.CC_STAT_WIDTH] <= max_size) & (stats[:, cv2.CC_STAT_HEIGHT] <= max_size)
+	widths, heights = stats[:, cv2.CC_STAT_WIDTH], stats[:, cv2.CC_STAT_HEIGHT]
+	keep = (widths <= max_size) & (heights <= max_size)
 	keep[0] = False   # label 0 is the background
+	dropped = [(int(w), int(h)) for w, h in zip(widths[1:], heights[1:]) if w > max_size or h > max_size]
 	cleaned = (keep[labels] * 255).astype(np.uint8)
-	return cleaned, int(stats[keep, cv2.CC_STAT_AREA].max(initial=0))
+	return cleaned, int(stats[keep, cv2.CC_STAT_AREA].max(initial=0)), dropped
 
 
 def _drop_large_blobs(mask: np.ndarray, max_size: int):
 	"""Zero out connected components wider or taller than `max_size`."""
-	return _drop_small_blobs_stats(mask, max_size)[0]
+	return _drop_large_blobs_stats(mask, max_size)[0]
 
 
 def _blank_ui(mask: np.ndarray, ui_boxes):
@@ -245,12 +258,8 @@ def _build_color_mask(hsv_band: np.ndarray, ui_boxes):
 	a UI frame would otherwise merge with it into a blob too big to keep."""
 	color_mask = _adaptive_color_mask(hsv_band, ui_boxes)
 	_blank_ui(color_mask, ui_boxes)
-	if DEBUG_SNAPSHOTS:
-		after_ui = int(np.count_nonzero(color_mask))
-		_, _, stats, _ = cv2.connectedComponentsWithStats(color_mask, connectivity=8)
-		dropped = [(int(w), int(h)) for w, h in zip(stats[1:, cv2.CC_STAT_WIDTH], stats[1:, cv2.CC_STAT_HEIGHT])
-				   if w > FLOAT_MAX_BLOB_SIZE or h > FLOAT_MAX_BLOB_SIZE]
-	color_mask = _drop_large_blobs(color_mask, FLOAT_MAX_BLOB_SIZE)
+	after_ui = int(np.count_nonzero(color_mask))
+	color_mask, _, dropped = _drop_large_blobs_stats(color_mask, FLOAT_MAX_BLOB_SIZE)
 	if DEBUG_SNAPSHOTS:
 		_debug('gate: color mask after blanking ' + str(len(ui_boxes)) + ' UI box(es) = ' + str(after_ui) + ' px, after dropping '
 			+ str(len(dropped)) + ' blob(s) over ' + str(FLOAT_MAX_BLOB_SIZE) + 'px' + (' ' + str(dropped[:5]) if dropped else '')
@@ -302,24 +311,22 @@ def _find_candidates(search_gray: np.ndarray, evidence_masks: Dict[str, np.ndarr
 			continue
 		result = cv2.matchTemplate(search_gray, template, cv2.TM_CCOEFF_NORMED)
 		rh, rw = result.shape
-		if DEBUG_SNAPSHOTS:
-			_, before_val, _, before_loc = cv2.minMaxLoc(result)
+		_, before_val, _, before_loc = cv2.minMaxLoc(result)
 
 		# result[y, x] scores the window anchored at (x, y); its center is (x + tw/2, y + th/2)
 		for bx0, by0, bx1, by1 in ui_boxes:
 			result[max(0, by0 - th // 2):max(0, by1 - th // 2), max(0, bx0 - tw // 2):max(0, bx1 - tw // 2)] = -1
-		if DEBUG_SNAPSHOTS:
-			_, after_ui_val, _, after_ui_loc = cv2.minMaxLoc(result)
-			if after_ui_loc != before_loc:
-				_debug('match: ' + template_path + ' UI exclusion removed its best spot ' + str(before_loc) + ' (score ' + str(round(before_val, 3))
-					+ ', window centered in a UI box); next best is ' + str(after_ui_loc) + ' (' + str(round(after_ui_val, 3)) + ')')
+		_, after_ui_val, _, after_ui_loc = cv2.minMaxLoc(result)
+		if after_ui_loc != before_loc:
+			_debug('match: ' + template_path + ' UI exclusion removed its best spot ' + str(before_loc) + ' (score ' + str(round(before_val, 3))
+				+ ', window centered in a UI box); next best is ' + str(after_ui_loc) + ' (' + str(round(after_ui_val, 3)) + ')')
 		if (tw, th) not in textures:
 			textures[(tw, th)] = _box_texture(search_gray, (tw, th))
 		result[textures[(tw, th)][:rh, :rw] < FLOAT_MIN_TEXTURE] = -1
 
 		_, shape_val, _, shape_loc = cv2.minMaxLoc(result)
 		shape_bests.append(Candidate(shape_val, shape_loc, (tw, th), template_path, EVIDENCE_AGREEMENT))
-		if DEBUG_SNAPSHOTS and shape_loc != after_ui_loc:
+		if shape_loc != after_ui_loc:
 			_debug('match: ' + template_path + ' texture floor (std ' + str(FLOAT_MIN_TEXTURE) + ') removed its best spot ' + str(after_ui_loc)
 				+ ' (score ' + str(round(after_ui_val, 3)) + ', a nearly featureless window); next best is ' + str(shape_loc) + ' (' + str(round(shape_val, 3)) + ')')
 
@@ -341,20 +348,15 @@ def _find_candidates(search_gray: np.ndarray, evidence_masks: Dict[str, np.ndarr
 def _agreeing_candidate(shape_bests):
 	"""The best member of the largest group of templates whose best windows agree on a place, or None when the group
 	has fewer than FLOAT_MIN_AGREEING_TEMPLATES templates or FLOAT_MIN_AGREEING_SHARE of those matched."""
-	def center(c):
-		return c.loc[0] + c.size[0] / 2, c.loc[1] + c.size[1] / 2
-	group_of = []
-	for c in shape_bests:
-		cx, cy = center(c)
-		group_of.append([m for m in shape_bests if m.score > FLOAT_MATCH_THRESHOLD and c.score > FLOAT_MATCH_THRESHOLD
-						 and (center(m)[0] - cx) ** 2 + (center(m)[1] - cy) ** 2 <= FLOAT_AGREEMENT_RADIUS ** 2])
+	group_of = [[m for m in shape_bests if m.score > FLOAT_MATCH_THRESHOLD and c.score > FLOAT_MATCH_THRESHOLD and _same_place(m, c)]
+				for c in shape_bests]
 	group = max(group_of, key=lambda g: (len(g), max((m.score for m in g), default=-1)), default=[])
 	needed = max(FLOAT_MIN_AGREEING_TEMPLATES, math.ceil(round(FLOAT_MIN_AGREEING_SHARE * len(shape_bests), 9)))
 	if len(group) < needed:
 		_debug('agreement: no ' + str(needed) + ' of ' + str(len(shape_bests)) + ' templates agree on a place (largest group ' + str(len(group)) + ')')
 		return None
 	winner = max(group, key=lambda m: m.score)
-	_debug('agreement: ' + str(len(group)) + ' templates agree near ' + str(tuple(round(v) for v in center(winner))) + ' - best ' + winner.template
+	_debug('agreement: ' + str(len(group)) + ' templates agree near ' + str(tuple(round(v) for v in _center(winner))) + ' - best ' + winner.template
 		+ ' ' + str(round(winner.score, 3)))
 	return winner
 
@@ -385,13 +387,9 @@ def _decide(candidates: Dict[str, Optional[Candidate]]) -> Optional[Candidate]:
 def _corroborating_evidence(chosen: Candidate, candidates: Dict[str, Optional[Candidate]]):
 	"""The other kinds of evidence whose best candidate clears the threshold within FLOAT_AGREEMENT_RADIUS px of the
 	chosen one: independent signals landing on the same place are far stronger than the same signals scattered."""
-	def center(c):
-		return c.loc[0] + c.size[0] / 2, c.loc[1] + c.size[1] / 2
-	cx, cy = center(chosen)
 	return tuple(evidence for evidence in EVIDENCE_PRIORITY
 				 if evidence != chosen.evidence and candidates.get(evidence) is not None
-				 and candidates[evidence].score > FLOAT_MATCH_THRESHOLD
-				 and (center(candidates[evidence])[0] - cx) ** 2 + (center(candidates[evidence])[1] - cy) ** 2 <= FLOAT_AGREEMENT_RADIUS ** 2)
+				 and candidates[evidence].score > FLOAT_MATCH_THRESHOLD and _same_place(candidates[evidence], chosen))
 
 
 # ------------------------------------------------------------------------------ 5. click point
@@ -404,7 +402,7 @@ def _base_click_point(hsv_region: np.ndarray):
 	rejections = []
 	for lo, hi in FLOAT_BASE_COLOR_RANGES:
 		mask = cv2.morphologyEx(cv2.inRange(hsv_region, lo, hi), cv2.MORPH_OPEN, np.ones((2, 2), dtype=np.uint8))
-		mask, largest_component = _drop_small_blobs_stats(mask, FLOAT_MAX_BLOB_SIZE)
+		mask, largest_component, _ = _drop_large_blobs_stats(mask, FLOAT_MAX_BLOB_SIZE)
 		if largest_component < FLOAT_MIN_BASE_BLOB_AREA:
 			rejections.append(str(largest_component) + ' px')
 		elif largest_component > FLOAT_MAX_BASE_BLOB_SHARE * mask.size:
