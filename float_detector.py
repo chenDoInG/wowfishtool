@@ -163,13 +163,15 @@ FALLBACK_VERTICAL_BIAS = 0.65
 
 # The grayscale-only fallback (see _pick_match) scores normalized correlation, which is
 # happy to hit 0.6-0.7 on a patch of nearly featureless dark water: with no float on screen
-# at all it still "found" one, twice, on two real empty frames (0.697 and 0.599; the picked
-# windows had a grayscale standard deviation of 1.7-1.9). Every real float window measured
-# is far more textured - std 7.9 and up across the fixtures (feather, bobber, line), 9.0 and up
-# for the templates themselves. A window flatter than this can't be a float, so it never gets
-# to compete. Deliberately only a floor: it stops flat water, not textured (rippled) water
-# that happens to correlate well.
-FLOAT_MIN_TEXTURE = 4
+# at all it still "found" one on real empty frames (0.697 and 0.599 on flat dark water; then,
+# on finely rippled dusk water, a match on the water or on a floating creature-name label).
+# Windows picked that way measured a grayscale standard deviation of 0.2-1.9 (flat water) and
+# 3.9-4.1 (fine ripples) - a first floor of 4 sat right on the second group and let 3 of 4 through.
+# Every real float window measured is far more textured: 7.5 and up across the fixtures for all
+# four template sizes (feather, bobber, line), 9.0 and up for the templates themselves. The floor
+# sits in the middle of that gap. Deliberately only a floor: it stops flat and finely rippled
+# water, not strongly textured water (moon glitter) that happens to correlate well.
+FLOAT_MIN_TEXTURE = 6
 
 # Off by default so a normal run never touches disk for this - flip to True (fishing.py
 # does this for you when its own DEBUG_SNAPSHOTS is set, see there) to save an annotated

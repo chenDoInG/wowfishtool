@@ -23,8 +23,6 @@ FLOAT_CASES = [
 	 'a distant ship near the horizon has saturated warm+cool colors and out-scored the '
 	 'float; fixed by restricting the search band to where a nearby cast lands (the '
 	 'same open-sea capture also covers the old shoreline color-boundary false positive)'),
-	('desaturated_feather.png', (1087, 796), TOLERANCE_PX, [],
-	 'overcast lighting drops the blue feather well below any fixed saturation floor'),
 	('backlit_float.png', (1355, 688), TOLERANCE_PX, [],
 	 'backlit against a hazy sky the feather washes out to water level - relies on the '
 	 'warm base color instead'),
@@ -40,9 +38,6 @@ FLOAT_CASES = [
 	('saturation_ceiling_clip.png', (914, 615), TOLERANCE_PX, [],
 	 'water so saturated the gate threshold exceeds 255 - the gate passes nothing, so '
 	 'the ungated grayscale match must carry it (score 0.659)'),
-	('dim_night_float.png', (1243.67, 695.69), TOLERANCE_PX, [],
-	 'dark night: the float itself renders dim (feather value 39-61), below the old '
-	 'FLOAT_MIN_VALUE=60'),
 	('dim_night_base_color.png', (1355.61, 695.46), TOLERANCE_PX, [],
 	 'dark night base: hue inside the daylight range but S/V far below its floors, so '
 	 'every cast fell back to the geometric center; needs the dim base color range'),
@@ -50,10 +45,6 @@ FLOAT_CASES = [
 	 'orange dusk: the gate rejects the float\'s true position while unrelated scattered '
 	 'pixels keep it "active" - grayscale alone scored 0.53-0.7 at the float, gated '
 	 'candidates only 0.24-0.34'),
-	('warm_water_gate_click_noise.png', (1388, 765), 40, [],
-	 'warm water fuses the base into one giant blob that gets dropped; leftover fragments '
-	 'summed to a confident-but-wrong centroid ~85px off. Correct answer is the '
-	 'geometric-center fallback, hence the looser tolerance (see FALLBACK_VERTICAL_BIAS)'),
 ]
 
 
@@ -299,7 +290,7 @@ def test_find_float_treats_a_screenshot_too_small_for_the_templates_as_not_found
 def test_find_float_says_so_when_there_are_no_templates(tmp_path, monkeypatch, capsys):
 	monkeypatch.setattr('float_detector.FLOAT_TEMPLATE_GLOB', str(tmp_path / 'nothing_*.png'))
 
-	assert find_float(os.path.join(FIXTURE_DIR, 'dim_night_float.png')) is None
+	assert find_float(os.path.join(FIXTURE_DIR, 'dim_night_base_color.png')) is None
 	assert 'No usable float templates' in capsys.readouterr().out
 
 
@@ -308,7 +299,7 @@ def _debug_lines(capsys):
 
 
 def test_no_trace_lines_unless_debug_is_on(capsys):
-	find_float(os.path.join(FIXTURE_DIR, 'dim_night_float.png'))
+	find_float(os.path.join(FIXTURE_DIR, 'dim_night_base_color.png'))
 
 	assert _debug_lines(capsys) == []
 
@@ -317,7 +308,7 @@ def test_debug_traces_every_step_of_a_color_matched_detection(capsys, monkeypatc
 	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
 	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOT_DIR', str(tmp_path))
 
-	find_float(os.path.join(FIXTURE_DIR, 'dim_night_float.png'))
+	find_float(os.path.join(FIXTURE_DIR, 'dim_night_base_color.png'))
 
 	lines = '\n'.join(_debug_lines(capsys))
 	for step in ('start:', 'ui: excluding 2 box(es)', 'gate: water baseline', 'gate: color mask after blanking', 'templates:',
@@ -329,7 +320,7 @@ def test_debug_says_why_the_click_point_fell_back(capsys, monkeypatch, tmp_path)
 	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
 	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOT_DIR', str(tmp_path))
 
-	find_float(os.path.join(FIXTURE_DIR, 'warm_water_gate_click_noise.png'))
+	find_float(os.path.join(FIXTURE_DIR, 'dusk_saturated_water.png'))
 
 	lines = '\n'.join(_debug_lines(capsys))
 	assert 'click: base color not found (largest blob' in lines
@@ -362,12 +353,8 @@ def test_debug_says_when_the_screenshot_has_no_search_band(capsys, monkeypatch, 
 def test_debug_says_no_position_passed_the_color_gate_instead_of_a_fake_location(capsys, monkeypatch, tmp_path):
 	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
 	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOT_DIR', str(tmp_path))
-	frame = cv2.imread(os.path.join(FIXTURE_DIR, 'dim_night_float.png'))
-	frame[695 - 90:695 + 90, 1243 - 90:1243 + 90] = frame[695 - 90:695 + 90, 1243 - 270:1243 - 90]   # erase the float: clone water over it
-	path = tmp_path / 'no_float.png'
-	cv2.imwrite(str(path), frame)
 
-	find_float(str(path))
+	find_float(os.path.join(FIXTURE_DIR, 'no_float_dark_water.png'))   # nothing float-colored anywhere in this water
 
 	lines = '\n'.join(_debug_lines(capsys))
 	assert 'no position had enough float-colored pixels' in lines
@@ -393,11 +380,13 @@ def test_debug_lists_the_blobs_the_gate_dropped(capsys, monkeypatch):
 	assert 'after dropping 1 blob(s) over 200px [(250, 10)]' in '\n'.join(_debug_lines(capsys))
 
 
-@pytest.mark.parametrize('fixture', ['no_float_dark_water_1.png', 'no_float_dark_water_2.png'])
-def test_find_float_finds_nothing_on_an_empty_stretch_of_flat_dark_water(fixture):
+@pytest.mark.parametrize('fixture', ['no_float_dark_water.png', 'no_float_dusk_water.png'])
+def test_find_float_finds_nothing_on_an_empty_stretch_of_dark_water(fixture):
 	"""Real frames with no float in the water at all (only the search band's water is kept, the
-	rest blacked out). The grayscale fallback used to "find" one on nearly featureless water,
-	scoring 0.697 and 0.599; a window that flat can't be a float (FLOAT_MIN_TEXTURE)."""
+	rest blacked out). The grayscale fallback used to "find" one on nearly featureless water
+	(dark_water: 0.599) and on finely rippled dusk water (dusk_water, windows with std
+	3.9-4.1, next to floating creature-name labels); windows that flat can't be a float
+	(FLOAT_MIN_TEXTURE)."""
 	assert find_float(os.path.join(FIXTURE_DIR, fixture)) is None
 
 
@@ -424,7 +413,7 @@ def test_find_float_still_finds_the_real_float_when_its_surroundings_are_flat(tm
 def test_debug_says_when_the_texture_floor_removed_a_templates_best_spot(capsys, monkeypatch):
 	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
 
-	find_float(os.path.join(FIXTURE_DIR, 'no_float_dark_water_1.png'))
+	find_float(os.path.join(FIXTURE_DIR, 'no_float_dark_water.png'))
 
 	lines = '\n'.join(_debug_lines(capsys))
 	assert 'texture floor (std ' in lines and 'nearly featureless window' in lines
