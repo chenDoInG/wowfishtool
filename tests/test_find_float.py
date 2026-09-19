@@ -11,8 +11,8 @@ import cv2
 import numpy as np
 import pytest
 
-from float_detector import (FLOAT_MAX_BLOB_SIZE, _adaptive_color_mask, _build_color_mask, _drop_large_blobs, _Match,
-								_pick_match, find_float)
+from float_detector import (FLOAT_MAX_BLOB_SIZE, FLOAT_MIN_TEXTURE, _adaptive_color_mask, _box_texture, _build_color_mask,
+								_drop_large_blobs, _Match, _pick_match, find_float)
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), 'fixtures')
 TOLERANCE_PX = 20
@@ -391,3 +391,41 @@ def test_debug_lists_the_blobs_the_gate_dropped(capsys, monkeypatch):
 	_build_color_mask(bgr, [], (0, 0, hsv.shape[1], hsv.shape[0]))
 
 	assert 'after dropping 1 blob(s) over 200px [(250, 10)]' in '\n'.join(_debug_lines(capsys))
+
+
+@pytest.mark.parametrize('fixture', ['no_float_dark_water_1.png', 'no_float_dark_water_2.png'])
+def test_find_float_finds_nothing_on_an_empty_stretch_of_flat_dark_water(fixture):
+	"""Real frames with no float in the water at all (only the search band's water is kept, the
+	rest blacked out). The grayscale fallback used to "find" one on nearly featureless water,
+	scoring 0.697 and 0.599; a window that flat can't be a float (FLOAT_MIN_TEXTURE)."""
+	assert find_float(os.path.join(FIXTURE_DIR, fixture)) is None
+
+
+def test_box_texture_is_the_standard_deviation_of_the_window_anchored_at_each_pixel():
+	"""texture[y, x] must describe the same box matchTemplate's result[y, x] scores."""
+	gray = np.random.default_rng(0).integers(0, 255, (120, 200), dtype=np.uint8)
+	tw, th = 33, 21
+
+	texture = _box_texture(gray, (tw, th))
+
+	for y, x in [(0, 0), (7, 11), (50, 90), (120 - th, 200 - tw)]:
+		assert abs(texture[y, x] - gray[y:y + th, x:x + tw].std()) < 1e-6
+
+
+def test_find_float_still_finds_the_real_float_when_its_surroundings_are_flat(tmp_path):
+	"""A float pasted onto perfectly flat water has flat surroundings but the float itself is
+	textured - the floor must only remove windows with no float in them."""
+	template = cv2.imread('var/fishing_float_1.png')
+	assert template.std() > FLOAT_MIN_TEXTURE   # the premise: the float itself is well above the floor
+
+	assert find_float(_frame_with_float_at(1280, 800, tmp_path)) is not None
+
+
+def test_debug_says_when_the_texture_floor_removed_a_templates_best_spot(capsys, monkeypatch):
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
+
+	find_float(os.path.join(FIXTURE_DIR, 'no_float_dark_water_1.png'))
+
+	lines = '\n'.join(_debug_lines(capsys))
+	assert 'texture floor (std ' in lines and 'nearly featureless window' in lines
+	assert 'end: float not found' in lines

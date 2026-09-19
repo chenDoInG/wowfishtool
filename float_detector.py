@@ -161,6 +161,16 @@ CLICK_SEARCH_PADDING_X_RATIO = 0.3
 # position landed exactly on the box's horizontal center already.
 FALLBACK_VERTICAL_BIAS = 0.65
 
+# The grayscale-only fallback (see _pick_match) scores normalized correlation, which is
+# happy to hit 0.6-0.7 on a patch of nearly featureless dark water: with no float on screen
+# at all it still "found" one, twice, on two real empty frames (0.697 and 0.599; the picked
+# windows had a grayscale standard deviation of 1.7-1.9). Every real float window measured
+# is far more textured - std 7.9 and up across the fixtures (feather, bobber, line), 9.0 and up
+# for the templates themselves. A window flatter than this can't be a float, so it never gets
+# to compete. Deliberately only a floor: it stops flat water, not textured (rippled) water
+# that happens to correlate well.
+FLOAT_MIN_TEXTURE = 4
+
 # Off by default so a normal run never touches disk for this - flip to True (fishing.py
 # does this for you when its own DEBUG_SNAPSHOTS is set, see there) to save an annotated
 # screenshot into DEBUG_SNAPSHOT_DIR any time the click point falls back to the matched
@@ -175,6 +185,15 @@ def _debug(message):
 	that would do real work just to build the message check DEBUG_SNAPSHOTS first."""
 	if DEBUG_SNAPSHOTS:
 		print('[float] ' + message)
+
+
+def _box_texture(gray: np.ndarray, window_size):
+	"""Per-pixel grayscale standard deviation of the window_size box anchored at that pixel's
+	top-left, i.e. texture[y, x] covers the same box matchTemplate's result[y, x] scores."""
+	g = gray.astype(np.float64)
+	mean = cv2.boxFilter(g, cv2.CV_64F, window_size, anchor=(0, 0), borderType=cv2.BORDER_REFLECT)
+	mean_of_squares = cv2.boxFilter(g * g, cv2.CV_64F, window_size, anchor=(0, 0), borderType=cv2.BORDER_REFLECT)
+	return np.sqrt(np.maximum(mean_of_squares - mean * mean, 0))
 
 
 def _box_density(mask: np.ndarray, window_size):
@@ -353,8 +372,9 @@ def _match_templates(search_gray: np.ndarray, color_mask: np.ndarray, ui_boxes):
 	gated: Optional[_Match] = None
 	raw: Optional[_Match] = None
 	densities = {}   # same-size templates share one density map
+	textures = {}    # and one texture map
 	templates = _load_templates()
-	_debug('templates: ' + str(len(templates)) + ' loaded (scores below are after UI exclusion), search band ' + str(search_gray.shape[1]) + 'x' + str(search_gray.shape[0]))
+	_debug('templates: ' + str(len(templates)) + ' loaded (scores below are after UI and texture exclusion), search band ' + str(search_gray.shape[1]) + 'x' + str(search_gray.shape[0]))
 	if not templates:
 		print('No usable float templates matching ' + FLOAT_TEMPLATE_GLOB + ' - nothing to match against')
 	for template_path, template in templates:
@@ -367,16 +387,26 @@ def _match_templates(search_gray: np.ndarray, color_mask: np.ndarray, ui_boxes):
 		result = cv2.matchTemplate(search_gray, template, cv2.TM_CCOEFF_NORMED)
 
 		rh, rw = result.shape
-		if DEBUG_SNAPSHOTS and ui_boxes:
+		if DEBUG_SNAPSHOTS:
 			_, before_val, _, before_loc = cv2.minMaxLoc(result)
 		for bx0, by0, bx1, by1 in ui_boxes:
 			# result[y, x] scores the window anchored at (x, y); its center is (x + tw/2, y + th/2)
 			result[max(0, by0 - th // 2):max(0, by1 - th // 2), max(0, bx0 - tw // 2):max(0, bx1 - tw // 2)] = -1
+		if DEBUG_SNAPSHOTS:
+			_, after_ui_val, _, after_ui_loc = cv2.minMaxLoc(result)
+			if after_ui_loc != before_loc:
+				_debug('match: ' + template_path + ' UI exclusion removed its best spot ' + str(before_loc) + ' (score ' + str(round(before_val, 3))
+					+ ', window centered in a UI box); next best is ' + str(after_ui_loc) + ' (' + str(round(after_ui_val, 3)) + ')')
+
+		# Flat water correlates deceptively well - see FLOAT_MIN_TEXTURE.
+		if (tw, th) not in textures:
+			textures[(tw, th)] = _box_texture(search_gray, (tw, th))
+		result[textures[(tw, th)][:rh, :rw] < FLOAT_MIN_TEXTURE] = -1
 
 		_, raw_val, _, raw_loc = cv2.minMaxLoc(result)
-		if DEBUG_SNAPSHOTS and ui_boxes and before_loc != raw_loc:
-			_debug('match: ' + template_path + ' UI exclusion removed its best spot ' + str(before_loc) + ' (score ' + str(round(before_val, 3))
-				+ ', window centered in a UI box); next best is ' + str(raw_loc) + ' (' + str(round(raw_val, 3)) + ')')
+		if DEBUG_SNAPSHOTS and raw_loc != after_ui_loc:
+			_debug('match: ' + template_path + ' texture floor (std ' + str(FLOAT_MIN_TEXTURE) + ') removed its best spot ' + str(after_ui_loc)
+				+ ' (score ' + str(round(after_ui_val, 3)) + ', a nearly featureless window); next best is ' + str(raw_loc) + ' (' + str(round(raw_val, 3)) + ')')
 		if raw is None or raw_val > raw.score:
 			raw = _Match(raw_val, raw_loc, (tw, th), template_path)
 
