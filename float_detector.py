@@ -35,10 +35,12 @@ FLOAT_MATCH_THRESHOLD = 0.35
 
 # Search band, as fractions of the window. Real detections fell between 39% and 77% of the height, below the
 # horizon and above the character; padded, because a float cropped out of the band cannot be recovered later.
-# The top was 0.38 until a far cast landed at 38.6%, its upper half cut off (0.24-0.33, not found); 0.34 finds it
-# (0.79), while 0.30 already lets a warm dusk's scenery win (warm_dusk_gate_miss).
+# The top was 0.38 until a far cast landed at 38.6%, its upper half cut off (0.24-0.33, not found); 0.34 found it, but at
+# night the stone wall along a canal reaches into a band that high and out-scored the dark float (0.50 against under 0.35):
+# 29 of 196 casts in one session clicked the same spot on the wall. 0.36 keeps the cut-off float (its top sits at 37.9%)
+# and drops the wall, while 0.30 already lets a warm dusk's scenery win (warm_dusk_gate_miss).
 FLOAT_SEARCH_X_RANGE = (0.25, 0.75)
-FLOAT_SEARCH_Y_RANGE = (0.34, 0.80)
+FLOAT_SEARCH_Y_RANGE = (0.36, 0.80)
 
 # Screen elements inside the band that are never the float: the player frame (bottom-left) and the copy WoW's
 # default modern layout adds (bottom-right). Fractions of the window, measured on a 2560x1410 capture, padded.

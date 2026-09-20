@@ -726,7 +726,7 @@ def test_the_click_finds_the_base_where_one_range_floods_with_the_water():
 
 
 def test_a_float_at_the_top_of_the_band_is_matched_whole_not_half_cut_off():
-	"""The band starts at 34% of the height: a far cast lands just below 38%, where the old edge cut the feather off."""
+	"""The band starts at 36% of the height: a far cast lands just below 38%, where the old edge cut the feather off."""
 	detection = find_float_detailed(os.path.join(FIXTURE_DIR, 'night_water_float_at_band_top.png'))
 
 	assert detection.score > 0.6   # 0.77 with the whole float in the band, 0.37 with the top cut off
@@ -797,3 +797,11 @@ def test_the_gate_is_left_alone_where_the_base_color_is_a_minority():
 	_, share = _band_base_range(hsv, [])
 
 	assert share == 0 and np.count_nonzero(_build_color_mask(hsv, [])) > 0
+
+
+def test_the_canal_wall_reaching_into_the_top_of_the_band_is_not_taken_for_the_float():
+	"""A night canal: the dark float scores under the threshold while the stone wall in the band's top-right corner scored
+	0.50 with the first template, so 29 of 196 casts clicked the same spot on the wall (with the band starting at 34%)."""
+	point = find_float(os.path.join(FIXTURE_DIR, 'canal_wall_at_band_top.png'))
+
+	assert point is None or not (point[0] >= 1600 and point[1] < 620)
