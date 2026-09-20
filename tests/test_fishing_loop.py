@@ -101,57 +101,40 @@ def test_a_recovery_that_leaves_the_game_on_the_login_page_stops_at_once(monkeyp
 	assert calls['casts'] == LIMIT   # no ten more casts on a page that cannot fish
 
 
-# ---- the recovery itself: Enter, look, Enter, look ...
+# ---- the recovery itself: a fixed run of Enters
 
-def _recover(monkeypatch, on_login_page_answers, stop_after_looks=None):
-	"""Run try_recover_from_disconnect() with the login-page check answering from a list (the last answer repeats);
-	returns (result, Enter presses, waits, screen looks)."""
+def _recover(monkeypatch, stop_after_presses=None):
+	"""Run try_recover_from_disconnect() without a screen or a clock; returns (result, Enter presses, waits, screen looks)."""
 	from types import SimpleNamespace
 	presses, waits, looks = [], [], []
-	answers = list(on_login_page_answers)
 	stopped = {'flag': False}
+
+	def fake_press(key):
+		presses.append(key)
+		if stop_after_presses is not None and len(presses) >= stop_after_presses:
+			stopped['flag'] = True
 
 	def fake_wait(seconds):
 		waits.append(seconds)
 		return stopped['flag']
 
-	def fake_on_login_page():
-		looks.append(1)
-		if stop_after_looks is not None and len(looks) >= stop_after_looks:
-			stopped['flag'] = True
-		return answers[min(len(looks) - 1, len(answers) - 1)]
-
-	monkeypatch.setattr(fishing.pyautogui, 'press', lambda key: presses.append(key))
+	monkeypatch.setattr(fishing.pyautogui, 'press', fake_press)
 	monkeypatch.setattr(fishing, 'stop_requested', SimpleNamespace(wait=fake_wait, is_set=lambda: stopped['flag']))
-	monkeypatch.setattr(fishing, 'on_login_page', fake_on_login_page)
+	monkeypatch.setattr(fishing, 'on_login_page', lambda: looks.append(1) or True)
 	return fishing.try_recover_from_disconnect(), presses, waits, len(looks)
 
 
-def test_recovery_follows_the_pages_one_enter_at_a_time_and_stops_pressing_once_in_the_world(monkeypatch):
-	# login page after the 1st press (dialog dismissed), character select after the 2nd, in the world (twice) after the 3rd
-	result, presses, waits, looks = _recover(monkeypatch, [True, True, False, False])
+def test_recovery_presses_enter_once_per_wait_without_looking_at_the_screen(monkeypatch):
+	"""Looking after a press would call character select "back in the world", since only the login page is recognised."""
+	result, presses, waits, looks = _recover(monkeypatch)
 
 	assert result is True
-	assert presses == ['enter'] * 3
-	assert waits == [2, 10, 18, fishing.RECOVERY_CONFIRM_SECONDS]
-	assert looks == 4
-
-
-def test_a_loading_screen_that_turns_out_to_be_the_login_page_again_keeps_pressing(monkeypatch):
-	# not the login page at the first look, back on it at the confirming look, then really in the world
-	result, presses, waits, looks = _recover(monkeypatch, [False, True, False, False])
-
-	assert result is True and presses == ['enter'] * 2
-
-
-def test_recovery_gives_up_after_every_round_when_the_login_page_never_goes_away(monkeypatch):
-	result, presses, waits, looks = _recover(monkeypatch, [True])
-
-	assert result is False
-	assert len(presses) == len(fishing.RECOVERY_WAITS) and waits == list(fishing.RECOVERY_WAITS)
+	assert presses == ['enter'] * len(fishing.RECOVERY_WAITS)
+	assert waits == list(fishing.RECOVERY_WAITS)
+	assert looks == 0
 
 
 def test_f11_during_the_recovery_ends_it_without_more_presses(monkeypatch):
-	result, presses, waits, looks = _recover(monkeypatch, [True], stop_after_looks=1)
+	result, presses, waits, looks = _recover(monkeypatch, stop_after_presses=1)
 
 	assert result is False and len(presses) == 1

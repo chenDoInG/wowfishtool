@@ -34,8 +34,7 @@ CAST_KEY = '1'   # fishing rod's action bar slot
 BAIT_KEY = '2'   # in-game macro that re-lures the fishing pole
 CAST_SETTLE_SECONDS = 2.5   # wait after casting before the screenshot: the bobber must land and settle. Raised from 2 to see whether the previous float's afterimage (seen in debug frames) has faded by then - not yet verified
 BAIT_REAPPLY_INTERVAL_SECONDS = 10 * 60 + 15   # a little past the lure's actual duration, so it never gets reapplied while the old one still has time left
-RECOVERY_WAITS = (2, 10, 18, 10, 10, 10)   # one Enter each, then this many seconds before looking at the screen: dialog, login page, world loading, then three more rounds for a slow connection
-RECOVERY_CONFIRM_SECONDS = 5   # a loading screen is not the login page either: look again this much later before calling it back in-world
+RECOVERY_WAITS = (2, 10, 18)   # one Enter each, then this many seconds of waiting: the dialog, the login page, character select and the world's loading screen
 MAX_CONSECUTIVE_MISSES = 10   # this many fish_once() calls in a row without a catch means something's actually wrong (window moved, wrong zone, game state stuck) rather than just bad luck - stop instead of grinding uselessly
 
 game_window_bbox = None   # (left, top, right, bottom) of the WoW window in absolute screen coords
@@ -163,8 +162,8 @@ def locate_float():
 
 
 def on_login_page():
-	"""Whether the game window shows the login or character-select page: what a disconnect, being logged in elsewhere,
-	a server kick and a frozen account all end on, whatever the dialog says."""
+	"""Whether the game window shows the login page: what a disconnect, being logged in elsewhere, a server kick and a
+	frozen account all end on, whatever the dialog says."""
 	locate_game_window()
 	screenshot = ImageGrab.grab(game_window_bbox)
 	return is_login_screen(cv2.cvtColor(np.array(screenshot.convert('RGB')), cv2.COLOR_RGB2BGR))
@@ -205,16 +204,15 @@ def _save_recovery_snapshot():
 
 def try_recover_from_disconnect():
 	"""Best-effort recovery for the case where MAX_CONSECUTIVE_MISSES was caused by getting disconnected (the disconnect,
-	logged-in-elsewhere, kick and frozen-account dialogs all leave the game on the login page): press Enter, which
-	activates whatever button the dialog and the login / character-select pages after it leave focused, and look at the
-	screen after each press. Stops pressing as soon as the login and character-select pages are gone (twice in a row,
-	RECOVERY_CONFIRM_SECONDS apart, because a loading screen is not the login page either) - one Enter too many in the
-	world only opens the chat box. Returns True when the game is back in the world, False when it is still on those pages
-	after every press (or F11 was pressed).
+	logged-in-elsewhere, kick and frozen-account dialogs all leave the game on the login page): press Enter once per
+	RECOVERY_WAITS entry and wait after each. Enter activates whatever button the dialog, the login page and the
+	character-select page leave focused, so the three presses go dialog -> login page -> character select -> world. The
+	screen is not looked at in between: only the login page is recognised, and a look after the first press would call
+	character select "back in the world". Whether the game is really back is left to the misses check in run_session().
+	Returns True after the last wait, False when F11 was pressed.
 
-	The waits are RECOVERY_WAITS: a real disconnect confirmed the first two presses get through the dialog and the login
-	page to character select, but a third press 2 s later fired before character select had loaded and never entered the
-	world; widened to 10 s and then 18 s for the world's loading screen, the extra rounds are for a slow connection.
+	The waits are what a real disconnect needed: a third press 2 s after the second fired before character select had
+	loaded and never entered the world, hence 10 s and then 18 s for the world's loading screen.
 	A trailing Escape was tried as a cleanup and removed: in the world it does not no-op, it opens the game menu, which
 	then blocks every cast until someone closes it by hand."""
 	print('On the login screen - pressing Enter to get back in')
@@ -223,17 +221,10 @@ def try_recover_from_disconnect():
 			return False
 		pyautogui.press('enter')
 		stop_requested.wait(wait)
-		if stop_requested.is_set():
-			return False
-		if not on_login_page():
-			stop_requested.wait(RECOVERY_CONFIRM_SECONDS)
-			if stop_requested.is_set():
-				return False
-			if not on_login_page():
-				_save_recovery_snapshot()
-				return True
+	if stop_requested.is_set():
+		return False
 	_save_recovery_snapshot()
-	return False
+	return True
 
 
 def fish_once():
@@ -265,7 +256,7 @@ def fish_once():
 			return False
 
 	move_mouse(place, elapsed_since_cast=time.time() - cast_time)
-	if not listen(stop_event=stop_requested):
+	if not listen(threshold=200, stop_event=stop_requested):
 		print('Didn\'t hear a bite, trying again')
 		return False
 	if stop_requested.is_set():
@@ -300,8 +291,6 @@ def run_session():
 						print('The game is not on the login screen, so this is not a disconnect - stopping')
 						break
 					if not try_recover_from_disconnect():
-						if not stop_requested.is_set():
-							print('Still on the login screen after pressing Enter - stopping')
 						break
 					consecutive_misses = 0
 					tried_recovery = True

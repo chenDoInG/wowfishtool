@@ -22,12 +22,6 @@ def classic_login():
 	return cv2.imread(os.path.join(FIXTURE_DIR, 'login_screen_classic.png'))
 
 
-@pytest.fixture(scope='module')
-def character_select():
-	"""The character-select screen, the character's name replaced by a fake one."""
-	return cv2.imread(os.path.join(FIXTURE_DIR, 'character_select_screen.png'))
-
-
 def test_the_classic_login_page_is_recognised(classic_login):
 	assert is_login_screen(classic_login)
 
@@ -60,25 +54,13 @@ def test_a_full_game_world_frame_is_not_the_login_page():
 
 @pytest.mark.parametrize('path', sorted(glob.glob(os.path.join(FIXTURE_DIR, '*.png'))))
 def test_no_other_fixture_is_the_login_page(path):
-	if os.path.basename(path) in ('login_screen.png', 'login_screen_classic.png', 'character_select_screen.png'):
+	if os.path.basename(path) in ('login_screen.png', 'login_screen_classic.png'):
 		pytest.skip('one of the pages itself')
 
 	assert not is_login_screen(cv2.imread(path))
 
 
-def test_the_character_select_screen_is_recognised_too(character_select):
-	"""One Enter further on from the login page: no Blizzard logo there, the enter-world button instead."""
-	assert is_login_screen(character_select)
-
-
-@pytest.mark.parametrize('factor', [0.6, 1.3])   # at 0.4 the create-character button scores 0.69, just under MIN_LOGO_SCORE: a window that small is not supported
-def test_the_character_select_screen_is_recognised_at_other_window_sizes(character_select, factor):
-	resized = cv2.resize(character_select, None, fx=factor, fy=factor, interpolation=cv2.INTER_AREA if factor < 1 else cv2.INTER_CUBIC)
-
-	assert is_login_screen(resized)
-
-
-@pytest.mark.parametrize('page, fixture_name', [('classic login page', 'classic_login'), ('login page', 'login'), ('character select', 'character_select')])
+@pytest.mark.parametrize('page, fixture_name', [('classic login page', 'classic_login'), ('login page', 'login')])
 def test_every_control_of_a_page_is_needed_so_a_real_session_is_never_stopped_on_one_lookalike(request, page, fixture_name):
 	image = request.getfixturevalue(fixture_name)
 	assert is_login_screen(image)

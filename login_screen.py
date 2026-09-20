@@ -1,11 +1,12 @@
-"""Tell whether the screenshot is WoW's login or character-select page instead of the game world.
+"""Tell whether the screenshot is WoW's login page instead of the game world.
 
 A disconnect, being logged in elsewhere, a server kick and a frozen account all end on that page (only the dialog text
-differs), or one Enter further on the character-select screen: the bot can find nothing to fish there and pressing
-keys does nothing. Each page is recognised by two of its own fixed controls at the bottom of the screen, both of which
-must be found (the classic-era login page: the game logo at the top-left and the exit button; a test-server login page:
-the Blizzard logo and the exit button; character select: the enter-world button and the create-character button). Stopping a real fishing session by mistake costs more than noticing the page a few casts later,
-and the game world has none of these controls. Nothing here depends on a logo that only some clients show.
+differs): the bot can find nothing to fish there and pressing keys does nothing. The character-select page is not
+recognised on purpose: its buttons differ between clients ("create character" is "create new character" on some), and
+the recovery does not need it. Each page is recognised by two of its own fixed controls, both of which must be found
+(the classic-era login page: the game logo at the top-left and the exit button; a test-server login page: the Blizzard
+logo and the exit button). Stopping a real fishing session by mistake costs more than noticing the page a few casts
+later, and the game world has none of these controls. Nothing here depends on a logo that only some clients show.
 """
 import glob
 import os
@@ -22,10 +23,6 @@ PAGES = {
 	'login page': (
 		('var/login_screen_logo_blizzard.png', 'bottom-center', 350, 160),
 		('var/login_screen_button_exit.png', 'bottom-right', 400, 160),
-	),
-	'character select': (
-		('var/login_screen_button_enter_world.png', 'bottom-center', 350, 160),
-		('var/login_screen_button_create_character.png', 'bottom-right', 400, 160),
 	),
 }
 REFERENCE_WIDTH = 1278          # the templates were cropped from a window this wide; bigger screenshots are shrunk to it
