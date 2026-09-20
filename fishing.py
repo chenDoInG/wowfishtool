@@ -34,6 +34,8 @@ CAST_KEY = '1'   # fishing rod's action bar slot
 BAIT_KEY = '2'   # in-game macro that re-lures the fishing pole
 CAST_SETTLE_SECONDS = 2.5   # wait after casting before the screenshot: the bobber must land and settle. Raised from 2 to see whether the previous float's afterimage (seen in debug frames) has faded by then - not yet verified
 BAIT_REAPPLY_INTERVAL_SECONDS = 10 * 60 + 15   # a little past the lure's actual duration, so it never gets reapplied while the old one still has time left
+RECOVERY_WAITS = (2, 10, 18, 10, 10, 10)   # one Enter each, then this many seconds before looking at the screen: dialog, login page, world loading, then three more rounds for a slow connection
+RECOVERY_CONFIRM_SECONDS = 5   # a loading screen is not the login page either: look again this much later before calling it back in-world
 MAX_CONSECUTIVE_MISSES = 10   # this many fish_once() calls in a row without a catch means something's actually wrong (window moved, wrong zone, game state stuck) rather than just bad luck - stop instead of grinding uselessly
 
 game_window_bbox = None   # (left, top, right, bottom) of the WoW window in absolute screen coords
@@ -191,57 +193,47 @@ def snatch(place):
 	pyautogui.click(button='right')
 
 
-def try_recover_from_disconnect():
-	"""Best-effort recovery for the case where MAX_CONSECUTIVE_MISSES was actually caused
-	by getting disconnected (the "已从服务器断开" dialog), not a detection problem: press
-	Enter three times, a couple seconds apart, on the guess that Enter activates whatever
-	button the disconnect dialog and the login/realm/character-select screens after it
-	leave focused. No visual confirmation this actually worked - it's a cheap, harmless
-	guess to try before giving up for good, not a real reconnect flow.
-
-	PARTIALLY VERIFIED: a real disconnect confirmed the first two presses do get through
-	the disconnect dialog and login/realm-select screens - a debug_notfound snapshot
-	caught it sitting on the character-select screen (the right character highlighted,
-	"进入魔兽世界" button visible) afterward. But the gap between the 2nd and 3rd press
-	wasn't enough for character-select to actually finish loading/settle before the 3rd
-	Enter fired, so it never actually entered the world - widened twice now (2s -> 5s ->
-	10s); still unverified whether it's enough yet. Same for the final wait (entering the
-	world triggers its own loading screen) - widened once (8s -> 18s), also unverified.
-
-	A plain detection miss (no disconnect at all, character still in-world and fishing
-	normally) can also fire MAX_CONSECUTIVE_MISSES - Enter with no dialog open just opens
-	the chat box, and every key fish_once() presses after that (bait, cast) gets typed into
-	it as chat text instead of doing anything. A trailing Escape was tried here as a blind
-	cleanup step for that case, but recovery_*.png snapshots caught it doing the opposite
-	in the *successful*-recovery case: with nothing left open (character already back
-	in-world), Escape doesn't no-op - it opens the main game menu (WoW's Escape is a
-	toggle: closes whatever's focused, or opens the game menu if nothing is). That menu
-	then sits there blocking every subsequent cast/click until someone closes it by hand,
-	which is worse than the chat-box case it was meant to fix - that one still self-resolves
-	via the same give-up-after-10-more-misses path this whole recovery does when it fails,
-	so dropping the trailing Escape doesn't actually make the miss-not-disconnect case any
-	worse, while it stops the success case from getting sabotaged. Removed."""
-	print('Trying Enter x3 in case this is a disconnect, not a detection problem')
-	pyautogui.press('enter')
-	stop_requested.wait(2)
-	pyautogui.press('enter')
-	# Character-select needs to finish loading (and the right character be selected)
-	# before Enter there activates "进入魔兽世界" - shorter waits used here before gave up
-	# too early, leaving it sitting on this screen instead of actually entering the world.
-	stop_requested.wait(10)
-	pyautogui.press('enter')
-	# If this really was a disconnect, this third Enter is the one that re-enters the
-	# world, which triggers a loading screen - give that more room than the 2s gap
-	# above before anything else tries to act on the (still loading) game window.
-	stop_requested.wait(18)
+def _save_recovery_snapshot():
 	if float_detector.DEBUG_SNAPSHOTS:
-		# Whether the wait above was actually long enough is otherwise only checkable by
-		# happening to be watching the screen live when it matters - save what the game
-		# window looks like right after recovery so it can be checked after the fact.
+		# Whether recovery really got back in-world is otherwise only checkable by happening to be watching
+		# the screen live when it matters - save what the game window looks like so it can be checked afterwards.
 		os.makedirs(float_detector.DEBUG_SNAPSHOT_DIR, exist_ok=True)
 		recovery_path = os.path.join(float_detector.DEBUG_SNAPSHOT_DIR, 'recovery_' + str(int(time.time())) + '.png')
 		ImageGrab.grab(game_window_bbox).save(recovery_path)
 		print('Saved ' + recovery_path + ' to check whether recovery actually got back in-world')
+
+
+def try_recover_from_disconnect():
+	"""Best-effort recovery for the case where MAX_CONSECUTIVE_MISSES was caused by getting disconnected (the disconnect,
+	logged-in-elsewhere, kick and frozen-account dialogs all leave the game on the login page): press Enter, which
+	activates whatever button the dialog and the login / character-select pages after it leave focused, and look at the
+	screen after each press. Stops pressing as soon as the login and character-select pages are gone (twice in a row,
+	RECOVERY_CONFIRM_SECONDS apart, because a loading screen is not the login page either) - one Enter too many in the
+	world only opens the chat box. Returns True when the game is back in the world, False when it is still on those pages
+	after every press (or F11 was pressed).
+
+	The waits are RECOVERY_WAITS: a real disconnect confirmed the first two presses get through the dialog and the login
+	page to character select, but a third press 2 s later fired before character select had loaded and never entered the
+	world; widened to 10 s and then 18 s for the world's loading screen, the extra rounds are for a slow connection.
+	A trailing Escape was tried as a cleanup and removed: in the world it does not no-op, it opens the game menu, which
+	then blocks every cast until someone closes it by hand."""
+	print('On the login screen - pressing Enter to get back in')
+	for wait in RECOVERY_WAITS:
+		if stop_requested.is_set():
+			return False
+		pyautogui.press('enter')
+		stop_requested.wait(wait)
+		if stop_requested.is_set():
+			return False
+		if not on_login_page():
+			stop_requested.wait(RECOVERY_CONFIRM_SECONDS)
+			if stop_requested.is_set():
+				return False
+			if not on_login_page():
+				_save_recovery_snapshot()
+				return True
+	_save_recovery_snapshot()
+	return False
 
 
 def fish_once():
@@ -307,8 +299,10 @@ def run_session():
 					if not on_login_page():
 						print('The game is not on the login screen, so this is not a disconnect - stopping')
 						break
-					print('On the login screen - trying to get back in')
-					try_recover_from_disconnect()
+					if not try_recover_from_disconnect():
+						if not stop_requested.is_set():
+							print('Still on the login screen after pressing Enter - stopping')
+						break
 					consecutive_misses = 0
 					tried_recovery = True
 				else:
