@@ -4,6 +4,8 @@ import sys
 import threading
 import time
 
+import cv2
+import numpy as np
 import psutil
 import pyautogui
 import pygetwindow as gw
@@ -13,6 +15,7 @@ from pynput import keyboard
 import float_detector
 from audio_listener import listen
 from float_detector import find_float
+from login_screen import is_login_screen
 
 dev = False
 
@@ -157,6 +160,14 @@ def locate_float():
 	return find_float(screenshot_path)
 
 
+def on_login_page():
+	"""Whether the game window shows the login or character-select page: what a disconnect, being logged in elsewhere,
+	a server kick and a frozen account all end on, whatever the dialog says."""
+	locate_game_window()
+	screenshot = ImageGrab.grab(game_window_bbox)
+	return is_login_screen(cv2.cvtColor(np.array(screenshot.convert('RGB')), cv2.COLOR_RGB2BGR))
+
+
 def move_mouse(place, duration=0.3, quiet=False, elapsed_since_cast=None):
 	x, y = place
 	if not quiet:
@@ -276,6 +287,36 @@ def fish_once():
 	return True
 
 
+def run_session():
+	"""Fish until F11, or until the misses say something is wrong. Returns how many fish were caught."""
+	caught = 0
+	consecutive_misses = 0
+	tried_recovery = False
+	while fishing_active.is_set() and not stop_requested.is_set():
+		if fish_once():
+			caught += 1
+			consecutive_misses = 0
+			tried_recovery = False
+		elif stop_requested.is_set():
+			break   # F11 ended this cast early; that is not a miss
+		else:
+			consecutive_misses += 1
+			if consecutive_misses >= MAX_CONSECUTIVE_MISSES:
+				if not tried_recovery:
+					print(str(consecutive_misses) + ' misses in a row - checking whether the game has disconnected')
+					if not on_login_page():
+						print('The game is not on the login screen, so this is not a disconnect - stopping')
+						break
+					print('On the login screen - trying to get back in')
+					try_recover_from_disconnect()
+					consecutive_misses = 0
+					tried_recovery = True
+				else:
+					print(str(MAX_CONSECUTIVE_MISSES) + ' misses in a row even after trying to recover - stopping')
+					break
+	return caught
+
+
 def main():
 	if check_process() and not dev:
 		print("Waiting 2 seconds, so you can switch to WoW")
@@ -288,26 +329,7 @@ def main():
 	while not dev:
 		fishing_active.wait()
 
-		caught = 0
-		consecutive_misses = 0
-		tried_recovery = False
-		while fishing_active.is_set() and not stop_requested.is_set():
-			if fish_once():
-				caught += 1
-				consecutive_misses = 0
-				tried_recovery = False
-			else:
-				consecutive_misses += 1
-				if consecutive_misses >= MAX_CONSECUTIVE_MISSES:
-					if not tried_recovery:
-						print(str(consecutive_misses) + ' misses in a row - might be a disconnect, trying to recover')
-						try_recover_from_disconnect()
-						consecutive_misses = 0
-						tried_recovery = True
-					else:
-						print(str(MAX_CONSECUTIVE_MISSES) + ' misses in a row even after trying to recover - stopping')
-						break
-
+		caught = run_session()
 		print('caught ' + str(caught))
 		fishing_active.clear()
 		print('Stopped. Press F10 to start again.')
