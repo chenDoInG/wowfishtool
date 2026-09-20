@@ -29,6 +29,7 @@ SCREENSHOT_PATH = 'var/fishing_session.png'
 
 CAST_KEY = '1'   # fishing rod's action bar slot
 BAIT_KEY = '2'   # in-game macro that re-lures the fishing pole
+CAST_SETTLE_SECONDS = 2.5   # wait after casting before the screenshot: the bobber must land and settle. Raised from 2 to see whether the previous float's afterimage (seen in debug frames) has faded by then - not yet verified
 BAIT_REAPPLY_INTERVAL_SECONDS = 10 * 60 + 15   # a little past the lure's actual duration, so it never gets reapplied while the old one still has time left
 MAX_CONSECUTIVE_MISSES = 10   # this many fish_once() calls in a row without a catch means something's actually wrong (window moved, wrong zone, game state stuck) rather than just bad luck - stop instead of grinding uselessly
 
@@ -145,7 +146,7 @@ def send_float():
 	# animating in, which find_float() then just fails to match. If it starts missing
 	# the float often (check the "Xs since cast" logged on a successful find), this
 	# needs to go back up rather than lower.
-	stop_requested.wait(2)
+	stop_requested.wait(CAST_SETTLE_SECONDS)
 
 
 def locate_float():

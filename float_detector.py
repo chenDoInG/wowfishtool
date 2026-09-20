@@ -11,7 +11,7 @@ Pipeline, in the order find_float_detailed() runs it:
                several templates agreeing on one place.
 4. decide      The strongest kind of evidence whose best candidate clears FLOAT_MATCH_THRESHOLD wins.
                Shape alone never decides: on water it scores 0.4-0.7 almost anywhere.
-5. click point The base's color centroid near the match, else a point FALLBACK_VERTICAL_BIAS down its box.
+5. click point The base's color centroid near the match, else the template's own base position in the box.
 
 Coordinates are in the original screenshot's pixels. Comments say what a constant is for and what it was
 measured on; the history is in the commit messages and README.
@@ -50,6 +50,7 @@ UI_EXCLUDE_REGIONS = (
 # Evidence 1, relative saturation: a pixel counts when it is more saturated than the scene's water by a margin.
 # The baseline is the 99.5th percentile (a saturated sea plateaus up to its 99th) and leaves the UI frames out
 # (~2% of the band, they would drag it up and blind the gate).
+# Where the base color floods the band (FLOAT_MAX_BASE_SCENE_SHARE) only gate pixels outside its ranges count: see _build_color_mask.
 FLOAT_SATURATION_BASELINE_PERCENTILE = 99.5
 FLOAT_SATURATION_MARGIN = 20
 FLOAT_MIN_VALUE = 30         # near-black pixels have unstable saturation; the dimmest real float pixel was 39
@@ -86,13 +87,20 @@ FLOAT_MIN_AGREEING_TEMPLATES = 3
 FLOAT_MIN_AGREEING_SHARE = 0.4
 FLOAT_AGREEMENT_RADIUS = 45
 
-# Click point: look for the base in the box padded down and sideways (never up: the feather is there), else click
-# FALLBACK_VERTICAL_BIAS of the way down the box, where the base sits below the feather that pulls the center up
-# (measured on two manually verified scenes).
+# Click point: look for the base in the box padded to the right and down (never up: the feather is there; never left:
+# the feather points left and a click on the water beside it misses, while a click on the float itself, feather included,
+# catches - 2 of 4 warm-dusk clicks 5-15 px left of the box missed, the 2 inside it caught). The base hangs below and to
+# the right of a tight template box (one fixture's is 0.2 of the box width past it). Else click the template's own base
+# position, or FALLBACK_POINT when its base is too small to locate.
 CLICK_SEARCH_PADDING_TOP_RATIO = 0
 CLICK_SEARCH_PADDING_BOTTOM_RATIO = 0.5
-CLICK_SEARCH_PADDING_X_RATIO = 0.3
+CLICK_SEARCH_PADDING_LEFT_RATIO = 0
+CLICK_SEARCH_PADDING_RIGHT_RATIO = 0.3
 FALLBACK_VERTICAL_BIAS = 0.65
+FALLBACK_POINT = (0.5, FALLBACK_VERTICAL_BIAS)   # (x, y) as fractions of the box, for a template whose own base cannot be located
+# The base must fill this share of the template to trust its position there. Measured on the 7 templates: 7.4%, 4.0%,
+# 2.0%, 0.8%, 0.6%, 0.06% and none - a template that is mostly water has only a few base pixels, and its centroid is noise.
+FLOAT_MIN_TEMPLATE_BASE_SHARE = 0.03
 
 # Templates are crops from ~2560 px wide windows and only match a float of about that size. A screenshot outside
 # FLOAT_UNSCALED_WIDTH_RATIOS of the reference width is matched on a resized copy (a 919 px window showed the float at
@@ -255,11 +263,30 @@ def _adaptive_color_mask(hsv_region: np.ndarray, ui_boxes=()):
 	return mask
 
 
-def _build_color_mask(hsv_band: np.ndarray, ui_boxes):
+def _band_base_range(hsv_band: np.ndarray, ui_boxes):
+	"""The base color ranges' pixels over the band, UI blanked, and the share of the band they cover."""
+	base_range = _base_range_mask(hsv_band)
+	_blank_ui(base_range, ui_boxes)
+	return base_range, np.count_nonzero(base_range) / base_range.size
+
+
+def _build_color_mask(hsv_band: np.ndarray, ui_boxes, base_range=None):
 	"""Evidence 1: the saturation mask with UI blanked, then oversized blobs dropped. In this order: a float touching
-	a UI frame would otherwise merge with it into a blob too big to keep."""
+	a UI frame would otherwise merge with it into a blob too big to keep.
+
+	Where the base color floods the scene (FLOAT_MAX_BASE_SCENE_SHARE) the water, and the previous cast's float still
+	fading on it, are inside its ranges while the feather is not: only gate pixels outside the ranges are kept, so a
+	window with a base but no feather - that afterimage - is not supported. Measured on 140 warm-dusk casts: 13 picks
+	sat on the afterimage, all 13 moved onto the real float; no fixture changed."""
 	color_mask = _adaptive_color_mask(hsv_band, ui_boxes)
 	_blank_ui(color_mask, ui_boxes)
+	base_range, scene_share = _band_base_range(hsv_band, ui_boxes) if base_range is None else (base_range, np.count_nonzero(base_range) / base_range.size)
+	if scene_share > FLOAT_MAX_BASE_SCENE_SHARE:
+		before = int(np.count_nonzero(color_mask))
+		outside_ranges = cv2.dilate(cv2.bitwise_not(base_range), np.ones((3, 3), dtype=np.uint8))   # a pixel of slack for the edges
+		color_mask = cv2.bitwise_and(color_mask, outside_ranges)
+		_debug('gate: base color covers ' + str(round(100 * scene_share)) + '% of the band - keeping only gate pixels outside its ranges (the feather, not the water or an afterimage): '
+			+ str(before) + ' px -> ' + str(int(np.count_nonzero(color_mask))) + ' px')
 	after_ui = int(np.count_nonzero(color_mask))
 	color_mask, _, dropped = _drop_large_blobs_stats(color_mask, FLOAT_MAX_BLOB_SIZE)
 	if DEBUG_SNAPSHOTS:
@@ -277,12 +304,10 @@ def _base_range_mask(hsv: np.ndarray):
 	return cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), dtype=np.uint8))
 
 
-def _base_color_mask(hsv_band: np.ndarray, ui_boxes):
+def _base_color_mask(hsv_band: np.ndarray, ui_boxes, base_range=None):
 	"""Evidence 2: base-colored pixels with UI blanked and oversized blobs dropped. Empty when the scene floods the
 	ranges (FLOAT_MAX_BASE_SCENE_SHARE): filtering windows one by one would only leave the wrong ones."""
-	mask = _base_range_mask(hsv_band)
-	_blank_ui(mask, ui_boxes)
-	scene_share = np.count_nonzero(mask) / mask.size
+	mask, scene_share = _band_base_range(hsv_band, ui_boxes) if base_range is None else (base_range.copy(), np.count_nonzero(base_range) / base_range.size)
 	if scene_share > FLOAT_MAX_BASE_SCENE_SHARE:
 		_debug('base color: ' + str(round(100 * scene_share)) + '% of the band is inside the base color ranges - the scene shares the hue, ignoring it as evidence')
 		return np.zeros_like(mask)
@@ -396,11 +421,11 @@ def _corroborating_evidence(chosen: Candidate, candidates: Dict[str, Optional[Ca
 
 # ------------------------------------------------------------------------------ 5. click point
 
-def _base_click_point(hsv_region: np.ndarray):
-	"""Centroid of the base's color in `hsv_region`, or None without one solid blob to trust. Each range is tried on
-	its own: the union floods when one range matches the water, fusing base and water into a blob dropped as scenery.
-	A blob qualifies when it clears FLOAT_MIN_BASE_BLOB_AREA (scattered flecks are what water sharing the hue leaves)
-	and does not fill the region (that is a surface, not a base)."""
+def _find_base(hsv_region: np.ndarray):
+	"""((x, y) centroid of the base's color in `hsv_region`, area of its largest blob), or (None, [why each range failed]).
+	Each range is tried on its own: the union floods when one range matches the water, fusing base and water into a blob
+	dropped as scenery. A blob qualifies when it clears FLOAT_MIN_BASE_BLOB_AREA (scattered flecks are what water sharing
+	the hue leaves) and does not fill the region (that is a surface, not a base)."""
 	rejections = []
 	for lo, hi in FLOAT_BASE_COLOR_RANGES:
 		mask = cv2.morphologyEx(cv2.inRange(hsv_region, lo, hi), cv2.MORPH_OPEN, np.ones((2, 2), dtype=np.uint8))
@@ -411,10 +436,31 @@ def _base_click_point(hsv_region: np.ndarray):
 			rejections.append(str(largest_component) + ' px = scenery')
 		else:
 			moments = cv2.moments(mask, binaryImage=True)
-			_debug('click: base color found (largest blob ' + str(largest_component) + ' px, ' + str(int(moments['m00'])) + ' px total)')
-			return moments['m10'] / moments['m00'], moments['m01'] / moments['m00']
-	_debug('click: base color not found (largest blob per range: ' + ', '.join(rejections) + '; need ' + str(FLOAT_MIN_BASE_BLOB_AREA) + ' and under ' + str(round(100 * FLOAT_MAX_BASE_BLOB_SHARE)) + '% of the region)')
-	return None
+			return (moments['m10'] / moments['m00'], moments['m01'] / moments['m00']), largest_component
+	return None, rejections
+
+
+def _base_click_point(hsv_region: np.ndarray):
+	"""Centroid of the base's color in `hsv_region` (region coordinates), or None without one solid blob to trust."""
+	point, detail = _find_base(hsv_region)
+	if point is None:
+		_debug('click: base color not found (largest blob per range: ' + ', '.join(detail) + '; need ' + str(FLOAT_MIN_BASE_BLOB_AREA) + ' and under ' + str(round(100 * FLOAT_MAX_BASE_BLOB_SHARE)) + '% of the region)')
+		return None
+	_debug('click: base color found (largest blob ' + str(detail) + ' px)')
+	return point
+
+
+def _template_base_anchor(template_path: str):
+	"""Where the base sits inside this template, as (x, y) fractions of its size: the anchor for a click that cannot
+	find the base by color. FALLBACK_POINT when the template's base is too small to locate."""
+	template = cv2.imread(template_path)
+	if template is None:
+		return FALLBACK_POINT
+	h, w = template.shape[:2]
+	point, detail = _find_base(cv2.cvtColor(template, cv2.COLOR_BGR2HSV))
+	if point is None or detail < FLOAT_MIN_TEMPLATE_BASE_SHARE * w * h:
+		return FALLBACK_POINT
+	return point[0] / w, point[1] / h
 
 
 def _save_debug_snapshot(img_bgr: np.ndarray, box_tl, box_size, click_point, prefix: str, label: str):
@@ -440,22 +486,24 @@ def _save_debug_snapshot(img_bgr: np.ndarray, box_tl, box_size, click_point, pre
 
 
 def _click_point(img_bgr: np.ndarray, hsv: np.ndarray, candidate: Candidate, bounds):
-	"""((x, y), on_base_color): the base's color centroid near the match, else FALLBACK_VERTICAL_BIAS down its box."""
+	"""((x, y), on_base_color): the base's color centroid near the match, else the template's own base position in the box."""
 	h, w = img_bgr.shape[:2]
 	tw, th = candidate.size
 	tl = (candidate.loc[0] + bounds[0], candidate.loc[1] + bounds[1])   # back in full-image coordinates
 
-	# a tight template can leave little of the base inside the box, so search a padded box (down and sideways only)
-	x0, y0 = max(0, tl[0] - int(tw * CLICK_SEARCH_PADDING_X_RATIO)), max(0, tl[1] - int(th * CLICK_SEARCH_PADDING_TOP_RATIO))
-	x1, y1 = min(w, tl[0] + tw + int(tw * CLICK_SEARCH_PADDING_X_RATIO)), min(h, tl[1] + th + int(th * CLICK_SEARCH_PADDING_BOTTOM_RATIO))
+	# a tight template can leave little of the base inside the box, so search a box padded right and down (see CLICK_SEARCH_PADDING_*)
+	x0, y0 = max(0, tl[0] - int(tw * CLICK_SEARCH_PADDING_LEFT_RATIO)), max(0, tl[1] - int(th * CLICK_SEARCH_PADDING_TOP_RATIO))
+	x1, y1 = min(w, tl[0] + tw + int(tw * CLICK_SEARCH_PADDING_RIGHT_RATIO)), min(h, tl[1] + th + int(th * CLICK_SEARCH_PADDING_BOTTOM_RATIO))
 	_debug('click: searching for the base color in region (' + str(x0) + ',' + str(y0) + ')-(' + str(x1) + ',' + str(y1) + ')')
 	point = _base_click_point(hsv[y0:y1, x0:x1])
 	if point is not None:
 		_debug('click: using the base color centroid ' + str((round(x0 + point[0], 1), round(y0 + point[1], 1))))
 		return (x0 + point[0], y0 + point[1]), True
 
-	fallback_point = (tl[0] + tw / 2, tl[1] + th * FALLBACK_VERTICAL_BIAS)
-	_debug('click: using the matched box\'s center, ' + str(FALLBACK_VERTICAL_BIAS) + ' of the way down: ' + str((round(fallback_point[0], 1), round(fallback_point[1], 1))))
+	anchor = _template_base_anchor(candidate.template)
+	fallback_point = (tl[0] + tw * anchor[0], tl[1] + th * anchor[1])
+	_debug('click: using ' + ('the default position' if anchor == FALLBACK_POINT else candidate.template + '\'s base position') + ' ' + str((round(anchor[0], 2), round(anchor[1], 2)))
+		+ ' of the matched box: ' + str((round(fallback_point[0], 1), round(fallback_point[1], 1))))
 	return fallback_point, False
 
 
@@ -491,7 +539,8 @@ def find_float_detailed(screenshot_path) -> Optional[Detection]:
 	ui_boxes = _ui_boxes(w, h, bounds)
 	_debug('ui: excluding ' + str(len(ui_boxes)) + ' box(es) inside the band: ' + str(ui_boxes))
 
-	evidence_masks = {EVIDENCE_GATE: _build_color_mask(hsv_band, ui_boxes), EVIDENCE_BASE: _base_color_mask(hsv_band, ui_boxes)}
+	base_range, _ = _band_base_range(hsv_band, ui_boxes)
+	evidence_masks = {EVIDENCE_GATE: _build_color_mask(hsv_band, ui_boxes, base_range), EVIDENCE_BASE: _base_color_mask(hsv_band, ui_boxes, base_range)}
 	candidates = _find_candidates(search_gray, evidence_masks, ui_boxes)
 	candidate = _decide(candidates)
 	if candidate is None:

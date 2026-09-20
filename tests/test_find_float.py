@@ -12,9 +12,9 @@ import cv2
 import numpy as np
 import pytest
 
-from float_detector import (EVIDENCE_AGREEMENT, EVIDENCE_BASE, EVIDENCE_GATE, FLOAT_MAX_BLOB_SIZE, FLOAT_MIN_TEXTURE, Candidate,
+from float_detector import (EVIDENCE_AGREEMENT, EVIDENCE_BASE, EVIDENCE_GATE, FALLBACK_POINT, FLOAT_MAX_BLOB_SIZE, FLOAT_MIN_TEXTURE, Candidate,
 								_adaptive_color_mask, _agreeing_candidate, _base_click_point, _base_color_mask, _box_texture, _corroborating_evidence, _build_color_mask, _decide,
-								_drop_large_blobs, _normalization_scale, find_float, find_float_detailed)
+								_band_base_range, _drop_large_blobs, _click_point, _template_base_anchor, _normalization_scale, find_float, find_float_detailed)
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), 'fixtures')
 TOLERANCE_PX = 20
@@ -53,6 +53,10 @@ FLOAT_CASES = [
 	('night_water_float_at_band_top.png', (1167, 569), 10, [],
 	 'night water, a far cast landing at 38% of the height: the old band edge cut off the top of the feather (0.37 here, '
 	 'not found in another cast at 0.24-0.33). The base is also paler than the daylight range assumed (S 44-113)'),
+	('warm_dusk_afterimage.png', (1299, 880), 30, [(1222, 798)],
+	 'warm dusk water sharing the base hue (base color covers 86-91% of the band): the previous cast\'s float lingers as a '
+	 'featherless base 100 px from the new float and out-scored it (13 of 140 casts); the feather is outside the base color '
+	 'ranges while the water and the afterimage are inside, so only gate pixels outside them count'),
 	('dim_night_base_color.png', (1355.61, 695.46), TOLERANCE_PX, [],
 	 'dark night base: hue inside the daylight range but S/V far below its floors, so '
 	 'every cast fell back to the geometric center; needs the dim base color range'),
@@ -338,7 +342,7 @@ def test_debug_says_why_the_click_point_fell_back(capsys, monkeypatch, tmp_path)
 
 	lines = '\n'.join(_debug_lines(capsys))
 	assert 'click: base color not found (largest blob' in lines
-	assert "click: using the matched box's center" in lines
+	assert "click: using the default position" in lines   # this fixture's template is mostly water, so it has no base anchor of its own
 	assert os.listdir(tmp_path)   # the annotated fallback snapshot still gets saved
 
 
@@ -733,3 +737,63 @@ def test_a_pale_night_base_is_still_found_by_color():
 	detection = find_float_detailed(os.path.join(FIXTURE_DIR, 'night_water_float_at_band_top.png'))
 
 	assert detection.on_base_color
+
+
+def _click_scene(blob_x):
+	"""A 200x200 water image with one cream blob (a bobber base's color) at blob_x, and a template box at (100, 60), 40x40."""
+	bgr = np.full((200, 200, 3), (90, 80, 70), dtype=np.uint8)
+	base = cv2.cvtColor(np.full((1, 1, 3), (20, 100, 180), dtype=np.uint8), cv2.COLOR_HSV2BGR)[0, 0]
+	bgr[80:100, blob_x:blob_x + 12] = base
+	candidate = Candidate(0.6, (100, 60), (40, 40), 'var/fishing_float_5.png', EVIDENCE_GATE)
+	return bgr, cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV), candidate
+
+
+def test_the_click_does_not_take_a_base_colored_spot_left_of_the_box():
+	"""The feather points left, so a click on the water beside the box misses; a spot to the right can be the base."""
+	bgr, hsv, candidate = _click_scene(blob_x=82)   # x 82-93, inside the 0.3-of-the-width padding that used to reach left of the box
+
+	_, on_base = _click_point(bgr, hsv, candidate, (0, 0, 200, 200))
+
+	assert not on_base
+
+
+def test_the_click_does_take_a_base_that_hangs_right_of_the_box():
+	bgr, hsv, candidate = _click_scene(blob_x=145)   # right of the box (x 100-140) but inside the padding
+
+	(x, _), on_base = _click_point(bgr, hsv, candidate, (0, 0, 200, 200))
+
+	assert on_base and 145 <= x <= 157
+
+
+def test_a_template_with_a_solid_base_knows_where_it_sits_and_a_watery_one_does_not():
+	x, y = _template_base_anchor('var/fishing_float_1.png')
+
+	assert (0.65, 0.6) < (x, y) < (0.85, 0.8)   # measured 0.74, 0.69 here and 0.75-0.76, 0.63-0.65 on four live frames
+	assert _template_base_anchor('var/fishing_float_5.png') == FALLBACK_POINT
+
+
+def test_a_click_that_cannot_find_the_base_uses_the_templates_own_base_position(monkeypatch):
+	monkeypatch.setattr('float_detector._base_click_point', lambda hsv_region: None)
+
+	point = find_float(os.path.join(FIXTURE_DIR, 'night_water_float_at_band_top.png'))
+
+	assert math.hypot(point[0] - 1167, point[1] - 569) < 5   # 14.6 px off with the fixed (0.5, 0.65) of the box
+
+
+def test_where_the_base_color_floods_the_scene_the_gate_keeps_only_pixels_outside_it(capsys, monkeypatch, tmp_path):
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOT_DIR', str(tmp_path))
+
+	find_float(os.path.join(FIXTURE_DIR, 'warm_dusk_afterimage.png'))
+
+	assert 'keeping only gate pixels outside its ranges' in '\n'.join(_debug_lines(capsys))
+
+
+def test_the_gate_is_left_alone_where_the_base_color_is_a_minority():
+	"""On a scene the base ranges do not flood (a cool sea) the gate mask must not be narrowed."""
+	hsv = np.zeros((60, 80, 3), dtype=np.uint8)
+	hsv[:, :] = (105, 60, 90)        # water outside every base range
+	hsv[20:24, 30:35] = (100, 200, 200)   # a saturated float-colored patch, under the baseline's 0.5% tail
+	_, share = _band_base_range(hsv, [])
+
+	assert share == 0 and np.count_nonzero(_build_color_mask(hsv, [])) > 0
