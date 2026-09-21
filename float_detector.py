@@ -33,6 +33,11 @@ FLOAT_TEMPLATE_GLOB = 'var/fishing_float_*.png'
 # stay a miss scored 0.33. A weak match becomes "not found" (the caller retries) rather than a wasted click.
 FLOAT_MATCH_THRESHOLD = 0.35
 
+# An uncorroborated match scoring below this is worth a 'lowconf' debug snapshot; at or above it a lone signal on the
+# base color is routine on a dark night canal (real floats there sat at 0.57-0.69 without a second kind of evidence),
+# while the faint float on pale water (0.51) is the kind of pick worth a look.
+FLOAT_LOWCONF_SCORE = 0.55
+
 # Search band, as fractions of the window. Real detections fell between 39% and 77% of the height, below the
 # horizon and above the character; padded, because a float cropped out of the band cannot be recovered later.
 # The top was 0.38 until a far cast landed at 38.6%, its upper half cut off (0.24-0.33, not found); 0.34 found it, but at
@@ -114,6 +119,7 @@ FLOAT_MAX_UPSCALE = 4
 # Debugging: a trace line per step, and an annotated screenshot in DEBUG_SNAPSHOT_DIR when the click falls back to the
 # box or the pick is on base color that no second kind of evidence backs. Keep False when committing.
 DEBUG_SNAPSHOTS = False
+DEBUG_TRACE = False   # the [float] trace lines only; the snapshots above stay on. Only matters while DEBUG_SNAPSHOTS is on
 DEBUG_SNAPSHOT_DIR = 'debug'   # not var/, which holds the bot's real runtime data
 
 # ------------------------------------------------------------------------------ result types
@@ -160,8 +166,8 @@ def _same_place(a: Candidate, b: Candidate):
 
 
 def _debug(message):
-	"""Trace line, printed only while DEBUG_SNAPSHOTS is on."""
-	if DEBUG_SNAPSHOTS:
+	"""Trace line, printed only while DEBUG_SNAPSHOTS and DEBUG_TRACE are on."""
+	if DEBUG_SNAPSHOTS and DEBUG_TRACE:
 		print('[float] ' + message)
 
 
@@ -487,6 +493,27 @@ def _save_debug_snapshot(img_bgr: np.ndarray, box_tl, box_size, click_point, pre
 	return path
 
 
+def save_notfound_snapshot(screenshot_path, dest_path):
+	"""Write the screenshot to `dest_path` with the search band drawn on it, so a float that sits outside the band (or under a
+	UI box) can be told from one the matching simply missed: the yellow box is where the float is looked for, the blue boxes
+	inside it are the screen elements excluded. Returns True when written, False when the screenshot cannot be read or
+	written (a debugging aid must never take the caller down)."""
+	img_bgr = cv2.imread(screenshot_path)
+	if img_bgr is None:
+		return False
+	h, w = img_bgr.shape[:2]
+	bounds = _search_bounds(w, h)
+	x0, y0, x1, y1 = bounds
+	for bx0, by0, bx1, by1 in _ui_boxes(w, h, bounds):
+		cv2.rectangle(img_bgr, (x0 + bx0, y0 + by0), (x0 + bx1, y0 + by1), (255, 128, 0), 2)
+	cv2.rectangle(img_bgr, (x0, y0), (x1, y1), (0, 255, 255), 2)
+	cv2.putText(img_bgr, 'search band (float outside it is not looked for)', (x0, max(20, y0 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+	try:
+		return bool(cv2.imwrite(dest_path, img_bgr))
+	except cv2.error:
+		return False
+
+
 def _click_point(img_bgr: np.ndarray, hsv: np.ndarray, candidate: Candidate, bounds):
 	"""((x, y), on_base_color): the base's color centroid near the match, else the template's own base position in the box."""
 	h, w = img_bgr.shape[:2]
@@ -554,14 +581,14 @@ def find_float_detailed(screenshot_path) -> Optional[Detection]:
 	summary = candidate.evidence + ', ' + ('corroborated by ' + ' + '.join(corroborated_by) if corroborated_by else 'NOT corroborated by any other evidence')
 	print('Matched ' + candidate.template + ' (score ' + str(round(candidate.score, 3)) + ') - ' + summary)
 
-	# mistakes hide in fallback clicks and in matches no second evidence backs: keep a picture of each for review
+	# mistakes hide in fallback clicks and in weak matches no second evidence backs: keep a picture of each for review
 	box_tl = (candidate.loc[0] + bounds[0], candidate.loc[1] + bounds[1])
 	label = candidate.evidence + ' ' + str(round(candidate.score, 2)) + (' corroborated' if corroborated_by else ' UNCORROBORATED')
 	if not on_base_color:
 		path = _save_debug_snapshot(img_bgr, box_tl, candidate.size, point, 'fallback', label)
 		if path:
 			print('Click point fell back to the matched box\'s center - saved ' + path + ' for review')
-	elif not corroborated_by:
+	elif not corroborated_by and candidate.score < FLOAT_LOWCONF_SCORE:
 		path = _save_debug_snapshot(img_bgr, box_tl, candidate.size, point, 'lowconf', label)
 		if path:
 			print('Low confidence (' + summary + ') - saved ' + path + ' for review')

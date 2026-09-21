@@ -1,5 +1,4 @@
 import os
-import shutil
 import sys
 import threading
 import time
@@ -196,10 +195,14 @@ def _save_recovery_snapshot():
 	if float_detector.DEBUG_SNAPSHOTS:
 		# Whether recovery really got back in-world is otherwise only checkable by happening to be watching
 		# the screen live when it matters - save what the game window looks like so it can be checked afterwards.
-		os.makedirs(float_detector.DEBUG_SNAPSHOT_DIR, exist_ok=True)
-		recovery_path = os.path.join(float_detector.DEBUG_SNAPSHOT_DIR, 'recovery_' + str(int(time.time())) + '.png')
-		ImageGrab.grab(game_window_bbox).save(recovery_path)
-		print('Saved ' + recovery_path + ' to check whether recovery actually got back in-world')
+		# A debugging aid must never take recovery down with it, so a failed grab or write is reported and dropped.
+		try:
+			os.makedirs(float_detector.DEBUG_SNAPSHOT_DIR, exist_ok=True)
+			recovery_path = os.path.join(float_detector.DEBUG_SNAPSHOT_DIR, 'recovery_' + str(int(time.time())) + '.png')
+			ImageGrab.grab(game_window_bbox).save(recovery_path)
+			print('Saved ' + recovery_path + ' to check whether recovery actually got back in-world')
+		except Exception as e:
+			print('Could not save the recovery snapshot: ' + str(e))
 
 
 def try_recover_from_disconnect():
@@ -246,17 +249,18 @@ def fish_once():
 		if not place:
 			if float_detector.DEBUG_SNAPSHOTS:
 				# SCREENSHOT_PATH gets overwritten by the next cast, so preserve this
-				# one under a unique name before it's gone.
+				# one under a unique name before it's gone, with the search band drawn on it: a float
+				# outside the yellow box was never looked for.
 				os.makedirs(float_detector.DEBUG_SNAPSHOT_DIR, exist_ok=True)
 				debug_path = os.path.join(float_detector.DEBUG_SNAPSHOT_DIR, 'notfound_' + str(int(time.time())) + '.png')
-				shutil.copy(SCREENSHOT_PATH, debug_path)
-				print('Still can\'t find float, giving up on this cast - saved ' + debug_path + ' for review')
+				saved = float_detector.save_notfound_snapshot(SCREENSHOT_PATH, debug_path)
+				print('Still can\'t find float, giving up on this cast' + (' - saved ' + debug_path + ' for review' if saved else ' - could not save a snapshot'))
 			else:
 				print('Still can\'t find float, giving up on this cast')
 			return False
 
 	move_mouse(place, elapsed_since_cast=time.time() - cast_time)
-	if not listen(threshold=200, stop_event=stop_requested):
+	if not listen(threshold=15, stop_event=stop_requested):
 		print('Didn\'t hear a bite, trying again')
 		return False
 	if stop_requested.is_set():

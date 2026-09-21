@@ -14,7 +14,7 @@ import pytest
 
 from float_detector import (EVIDENCE_AGREEMENT, EVIDENCE_BASE, EVIDENCE_GATE, FALLBACK_POINT, FLOAT_MAX_BLOB_SIZE, FLOAT_MIN_TEXTURE, Candidate,
 								_adaptive_color_mask, _agreeing_candidate, _base_click_point, _base_color_mask, _box_texture, _corroborating_evidence, _build_color_mask, _decide,
-								_band_base_range, _drop_large_blobs, _click_point, _template_base_anchor, _normalization_scale, find_float, find_float_detailed)
+								_band_base_range, _drop_large_blobs, _click_point, _template_base_anchor, _normalization_scale, _search_bounds, find_float, find_float_detailed, save_notfound_snapshot)
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), 'fixtures')
 TOLERANCE_PX = 20
@@ -674,6 +674,20 @@ def test_a_low_confidence_pick_saves_a_snapshot_and_says_so(capsys, monkeypatch,
 	assert 'NOT corroborated by any other evidence' in out and 'Low confidence' in out
 
 
+def test_an_uncorroborated_pick_scoring_at_or_above_the_lowconf_score_saves_nothing(monkeypatch, tmp_path):
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
+	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOT_DIR', str(tmp_path))
+	detection = find_float_detailed(os.path.join(FIXTURE_DIR, 'small_float_on_pale_water.png'))
+	assert not detection.corroborated
+	for name in os.listdir(tmp_path):
+		os.remove(os.path.join(tmp_path, name))
+
+	monkeypatch.setattr('float_detector.FLOAT_LOWCONF_SCORE', detection.score)   # the pick now scores exactly at the line
+	find_float(os.path.join(FIXTURE_DIR, 'small_float_on_pale_water.png'))
+
+	assert os.listdir(tmp_path) == []
+
+
 def test_a_corroborated_pick_on_the_base_color_saves_nothing(monkeypatch, tmp_path):
 	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOTS', True)
 	monkeypatch.setattr('float_detector.DEBUG_SNAPSHOT_DIR', str(tmp_path))
@@ -805,3 +819,23 @@ def test_the_canal_wall_reaching_into_the_top_of_the_band_is_not_taken_for_the_f
 	point = find_float(os.path.join(FIXTURE_DIR, 'canal_wall_at_band_top.png'))
 
 	assert point is None or not (point[0] >= 1600 and point[1] < 620)
+
+
+def test_the_notfound_snapshot_draws_the_search_band_and_leaves_the_rest_of_the_frame_alone(tmp_path):
+	source = os.path.join(FIXTURE_DIR, 'dim_night_base_color.png')
+	dest = str(tmp_path / 'notfound.png')
+
+	assert save_notfound_snapshot(source, dest)
+
+	original, drawn = cv2.imread(source), cv2.imread(dest)
+	assert drawn.shape == original.shape
+	h, w = original.shape[:2]
+	x0, y0, x1, y1 = _search_bounds(w, h)
+	middle = (x0 + x1) // 2
+	assert tuple(drawn[y0, middle]) == (0, 255, 255) and tuple(drawn[y1, middle]) == (0, 255, 255)   # the band's top and bottom edges
+	assert np.array_equal(drawn[:y0 - 40], original[:y0 - 40])   # above the band (and its label) nothing is drawn
+	assert np.array_equal(drawn[y1 + 5:], original[y1 + 5:])   # nor below it
+
+
+def test_the_notfound_snapshot_reports_an_unreadable_screenshot_instead_of_raising(tmp_path):
+	assert save_notfound_snapshot(str(tmp_path / 'missing.png'), str(tmp_path / 'out.png')) is False

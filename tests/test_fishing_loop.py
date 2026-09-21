@@ -138,3 +138,17 @@ def test_f11_during_the_recovery_ends_it_without_more_presses(monkeypatch):
 	result, presses, waits, looks = _recover(monkeypatch, stop_after_presses=1)
 
 	assert result is False and len(presses) == 1
+
+
+def test_a_failed_recovery_snapshot_is_reported_and_does_not_raise(monkeypatch, tmp_path, capsys):
+	monkeypatch.setattr(fishing.float_detector, 'DEBUG_SNAPSHOTS', True)
+	monkeypatch.setattr(fishing.float_detector, 'DEBUG_SNAPSHOT_DIR', str(tmp_path))
+
+	def broken_grab(bbox):
+		raise OSError('no screen')
+
+	monkeypatch.setattr(fishing.ImageGrab, 'grab', broken_grab)
+
+	fishing._save_recovery_snapshot()
+
+	assert 'Could not save the recovery snapshot: no screen' in capsys.readouterr().out

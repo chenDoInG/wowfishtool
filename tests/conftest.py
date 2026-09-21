@@ -24,4 +24,5 @@ def _debug_snapshots_off(monkeypatch, tmp_path_factory):
 	the trace turn the flag on themselves."""
 	import float_detector
 	monkeypatch.setattr(float_detector, 'DEBUG_SNAPSHOTS', False)
+	monkeypatch.setattr(float_detector, 'DEBUG_TRACE', True)   # off locally to quieten the console; a test that turns DEBUG_SNAPSHOTS on wants the trace
 	monkeypatch.setattr(float_detector, 'DEBUG_SNAPSHOT_DIR', str(tmp_path_factory.mktemp('debug_snapshots')))
