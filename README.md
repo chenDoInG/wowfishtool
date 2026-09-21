@@ -83,6 +83,15 @@ Windows 设置 → 声音 → 输出设备 → 选 "CABLE Input"
 配置完用 `tests/test_listen.py` 实测能不能收到游戏声音、峰值均值多少,再照实际数值调
 `fishing.py` 里 `listen()` 的 `threshold`。
 
+**`threshold` 怎么改:** 在 `fishing.py` 的 `fish_once()` 里找 `listen(threshold=15, ...)`,改这个数字(当前是 15)。
+它是 1 秒滑动窗口内音量(RMS)平均值的门限,平均值超过它就算听到咬钩。
+
+- 调大:不容易把环境声、水声当成咬钩,但真咬钩的声音如果低于它就会漏掉,漏掉后要等 23 秒超时才重抛。
+- 调小:更灵敏,但游戏里没咬钩也可能被别的声音触发,表现为频繁出现 `Heard a bite!` 却捞不到鱼。
+- 怎么选值:跑一阵,看控制台里 `Heard a bite! (avg level X, ...)` 的 X 是真咬钩时的音量,
+  `No bite after 23s (peak avg level seen: Y, ...)` 的 Y 是没咬钩那段时间听到的最大音量。
+  把 `threshold` 设在 Y 之上、X 之下的位置。
+
 ### 4. 安装 Python 依赖
 
 #### 4.1 macOS:先装系统的 portaudio(Windows 跳过这步)
