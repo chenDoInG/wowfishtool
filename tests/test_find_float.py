@@ -14,7 +14,8 @@ import pytest
 
 from float_detector import (EVIDENCE_AGREEMENT, EVIDENCE_BASE, EVIDENCE_GATE, FALLBACK_POINT, FLOAT_MAX_BLOB_SIZE, FLOAT_MIN_TEXTURE, Candidate,
 								_adaptive_color_mask, _agreeing_candidate, _base_click_point, _base_color_mask, _box_texture, _corroborating_evidence, _build_color_mask, _decide,
-								_band_base_range, _drop_large_blobs, _click_point, _template_base_anchor, _normalization_scale, _search_bounds, find_float, find_float_detailed, save_notfound_snapshot)
+								_band_base_range, _drop_large_blobs, _click_point, _find_base, _load_templates, _template_base_anchor, _normalization_scale, _search_bounds,
+								find_float, find_float_detailed, save_notfound_snapshot)
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), 'fixtures')
 TOLERANCE_PX = 20
@@ -839,3 +840,35 @@ def test_the_notfound_snapshot_draws_the_search_band_and_leaves_the_rest_of_the_
 
 def test_the_notfound_snapshot_reports_an_unreadable_screenshot_instead_of_raising(tmp_path):
 	assert save_notfound_snapshot(str(tmp_path / 'missing.png'), str(tmp_path / 'out.png')) is False
+
+
+# ---- latent risks flagged by review, pinned as tests rather than fixed (see the review for the tradeoffs)
+
+def test_find_base_picks_the_first_qualifying_range_not_the_biggest_blob():
+	"""_find_base tries each FLOAT_BASE_COLOR_RANGES range on its own and returns on the first one that clears the
+	blob-size checks - it does not compare blob sizes across ranges. Here a small patch qualifies under range 0
+	(daylight warm tan) and a far bigger, more confident patch qualifies under range 2 (daylight hue dimmed by
+	night lighting); the small early one still wins. Pinning this so the order-dependence is visible rather than
+	silent - if _find_base is changed to prefer the biggest qualifying blob instead, update this assertion."""
+	canvas = (100, 100)
+	hsv = np.zeros((*canvas, 3), dtype=np.uint8)
+	hsv[:, :] = (115, 60, 40)   # background outside all four ranges
+	hsv[10:16, 10:16] = (20, 150, 180)     # 6x6 = 36px, range 0 only
+	hsv[50:70, 50:70] = (20, 30, 60)       # 20x20 = 400px, range 2 only - much bigger, but checked later
+
+	point, area = _find_base(hsv)
+
+	assert area == 36   # range 0's small blob, not range 2's 400px one
+	assert abs(point[0] - 12.5) <= 2 and abs(point[1] - 12.5) <= 2
+
+
+def test_the_agreement_share_was_calibrated_on_the_current_template_set():
+	"""FLOAT_MIN_AGREEING_SHARE (0.4) and the 55%/31%/14% recall-at-N-agreeing figures in its comment were measured
+	against the 7 templates in var/ at the time of writing; `needed` scales with however many templates are loaded
+	(see _agreeing_candidate), so adding templates does not break the mechanism, but it can leave 0.4 itself
+	uncalibrated for a template set that looks very different from the measured one. This is a tripwire, not a
+	correctness check: when it fails, re-read the README's '补一个新的鱼漂模板' section and consider re-measuring
+	recall at a few agreeing-template counts before trusting template-agreement on the new set."""
+	count = len(_load_templates())
+
+	assert count == 7, str(count) + ' templates found, not the 7 FLOAT_MIN_AGREEING_SHARE was calibrated on'

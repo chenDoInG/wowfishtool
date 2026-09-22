@@ -260,7 +260,7 @@ def fish_once():
 			return False
 
 	move_mouse(place, elapsed_since_cast=time.time() - cast_time)
-	if not listen(threshold=15, stop_event=stop_requested):
+	if not listen(threshold=100, stop_event=stop_requested):
 		print('Didn\'t hear a bite, trying again')
 		return False
 	if stop_requested.is_set():
