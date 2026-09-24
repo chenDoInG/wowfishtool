@@ -74,6 +74,15 @@ FLOAT_BASE_COLOR_RANGES = (
 )
 FLOAT_MIN_BASE_BLOB_AREA = 30      # the click point needs one solid base blob this big, not scattered flecks
 FLOAT_MAX_BASE_BLOB_SHARE = 0.5    # ...and it must not fill the click region: a real base is 1-9% of it, scenery 77-95%
+# Evidence 2's candidate window (see _base_color_mask) additionally requires a round-ish blob, not a fragment of
+# scenery clipped by the same color range (a sunset's reflection on the water shares the base's hue at dusk) - the
+# click point search (_find_base) does not use these, see its docstring for why. Measured on the 2026-09-23
+# Stormwind Harbor session: two confirmed real bases filled 0.50-0.57 of their box (aspect, long side over short,
+# 1.45-1.64); the reflection fragment behind a real miss that day filled 0.43 of a 79x11 box (aspect 7.18 - caught
+# by the aspect check below); a diagonal ripple fragment clipped to a near-square box passed that but filled only
+# 0.05-0.17 of it (caught by the extent check - a rotated sliver looks square end-to-end but is mostly empty).
+FLOAT_MIN_BASE_BLOB_EXTENT = 0.35  # area / bounding-box area
+FLOAT_MAX_BASE_BLOB_ASPECT = 2.5   # long side / short side of the bounding box
 # Base color is ignored as evidence when more than this share of the band is inside its ranges: the water or terrain
 # shares the hue and says nothing about where the float is. Measured on 14 scenes: 0-4.8% where informative, 21.7-88.2% where not.
 FLOAT_MAX_BASE_SCENE_SHARE = 0.15
@@ -203,6 +212,22 @@ def _drop_large_blobs(mask: np.ndarray, max_size: int):
 	return _drop_large_blobs_stats(mask, max_size)[0]
 
 
+def _compact_blob_stats(mask: np.ndarray, max_size: int, min_extent: float, max_aspect: float, min_area: int = 0):
+	"""(mask keeping only components that are also round-ish - fill at least `min_extent` of their bounding box and
+	are no more elongated than `max_aspect` - area of the biggest one kept or 0). See FLOAT_MIN_BASE_BLOB_EXTENT for
+	what these catch that the size cap alone does not. `min_area` additionally drops small compact specks (a cluster
+	of them can otherwise still sum past FLOAT_MIN_COLOR_PIXELS in _find_candidates's per-window density check, even
+	though none of them is big enough on its own to be a base - see _base_color_mask)."""
+	_, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+	widths, heights, areas = stats[:, cv2.CC_STAT_WIDTH], stats[:, cv2.CC_STAT_HEIGHT], stats[:, cv2.CC_STAT_AREA]
+	extent = areas / np.maximum(widths * heights, 1)
+	aspect = np.maximum(widths, heights) / np.maximum(np.minimum(widths, heights), 1)
+	keep = (widths <= max_size) & (heights <= max_size) & (extent >= min_extent) & (aspect <= max_aspect) & (areas >= min_area)
+	keep[0] = False   # label 0 is the background
+	cleaned = (keep[labels] * 255).astype(np.uint8)
+	return cleaned, int(areas[keep].max(initial=0))
+
+
 def _blank_ui(mask: np.ndarray, ui_boxes):
 	"""Zero the UI boxes of a band-sized mask: their bars and gold border are colorful but not a float."""
 	for bx0, by0, bx1, by1 in ui_boxes:
@@ -313,14 +338,15 @@ def _base_range_mask(hsv: np.ndarray):
 
 
 def _base_color_mask(hsv_band: np.ndarray, ui_boxes, base_range=None):
-	"""Evidence 2: base-colored pixels with UI blanked and oversized blobs dropped. Empty when the scene floods the
-	ranges (FLOAT_MAX_BASE_SCENE_SHARE): filtering windows one by one would only leave the wrong ones."""
+	"""Evidence 2: base-colored pixels with UI blanked, oversized blobs dropped, and small or non-round ones (scenery
+	clipped by the same range - see FLOAT_MIN_BASE_BLOB_EXTENT) dropped too. Empty when the scene floods the ranges
+	(FLOAT_MAX_BASE_SCENE_SHARE): filtering windows one by one would only leave the wrong ones."""
 	mask, scene_share = _band_base_range(hsv_band, ui_boxes) if base_range is None else (base_range.copy(), np.count_nonzero(base_range) / base_range.size)
 	if scene_share > FLOAT_MAX_BASE_SCENE_SHARE:
 		_debug('base color: ' + str(round(100 * scene_share)) + '% of the band is inside the base color ranges - the scene shares the hue, ignoring it as evidence')
 		return np.zeros_like(mask)
-	mask = _drop_large_blobs(mask, FLOAT_MAX_BLOB_SIZE)
-	_debug('base color: ' + str(int(np.count_nonzero(mask))) + ' px in the band inside the base color ranges')
+	mask, _ = _compact_blob_stats(mask, FLOAT_MAX_BLOB_SIZE, FLOAT_MIN_BASE_BLOB_EXTENT, FLOAT_MAX_BASE_BLOB_ASPECT, FLOAT_MIN_BASE_BLOB_AREA)
+	_debug('base color: ' + str(int(np.count_nonzero(mask))) + ' px in the band inside the base color ranges, round enough to trust')
 	return mask
 
 
@@ -421,7 +447,14 @@ def _decide(candidates: Dict[str, Optional[Candidate]]) -> Optional[Candidate]:
 
 def _corroborating_evidence(chosen: Candidate, candidates: Dict[str, Optional[Candidate]]):
 	"""The other kinds of evidence whose best candidate clears the threshold within FLOAT_AGREEMENT_RADIUS px of the
-	chosen one: independent signals landing on the same place are far stronger than the same signals scattered."""
+	chosen one: independent signals landing on the same place are far stronger than the same signals scattered.
+
+	A density-at-the-chosen-spot variant (crediting a kind of evidence even when its own best-scoring window was
+	elsewhere) was tried and reverted: on the 2026-09-23 Stormwind Harbor session it correctly caught 9 real floats
+	that this check alone misses, but it also credited 3 real misses, and no measurable property of the evidence
+	there (raw density, largest single blob in the window, the click point's own on_base_color check, scene-wide
+	base color share) could tell those two groups apart - ambient same-hued water in that scene is common enough
+	that "some base-colored material is nearby" carries little information by itself."""
 	return tuple(evidence for evidence in EVIDENCE_PRIORITY
 				 if evidence != chosen.evidence and candidates.get(evidence) is not None
 				 and candidates[evidence].score > FLOAT_MATCH_THRESHOLD and _same_place(candidates[evidence], chosen))
@@ -433,7 +466,12 @@ def _find_base(hsv_region: np.ndarray):
 	"""((x, y) centroid of the base's color in `hsv_region`, area of its largest blob), or (None, [why each range failed]).
 	Each range is tried on its own: the union floods when one range matches the water, fusing base and water into a blob
 	dropped as scenery. A blob qualifies when it clears FLOAT_MIN_BASE_BLOB_AREA (scattered flecks are what water sharing
-	the hue leaves) and does not fill the region (that is a surface, not a base)."""
+	the hue leaves) and does not fill the region (that is a surface, not a base).
+
+	Deliberately not compactness-filtered like _base_color_mask: on warm_dusk_afterimage.png the real base itself renders
+	as several small elongated fragments (the same color range's edge cuts through it under that lighting), and their
+	combined centroid - the moments below are taken over every surviving blob in the range, not just the biggest - lands
+	on the real base; requiring each fragment to be round on its own throws that away and was tried and made it worse."""
 	rejections = []
 	for lo, hi in FLOAT_BASE_COLOR_RANGES:
 		mask = cv2.morphologyEx(cv2.inRange(hsv_region, lo, hi), cv2.MORPH_OPEN, np.ones((2, 2), dtype=np.uint8))

@@ -65,6 +65,10 @@ FLOAT_CASES = [
 	 'orange dusk: the gate rejects the float\'s true position while unrelated scattered '
 	 'pixels keep it "active" - grayscale alone scored 0.53-0.7 at the float, gated '
 	 'candidates only 0.24-0.34'),
+	('harbor_dusk_streak_hit.png', (1111, 782), TOLERANCE_PX, [],
+	 "Stormwind Harbor at dusk: the sunset's reflection streaks on the water share the base hue and litter the band "
+	 'with small, non-round fragments that _base_color_mask must filter out (see FLOAT_MIN_BASE_BLOB_EXTENT / '
+	 'FLOAT_MAX_BASE_BLOB_ASPECT) for base color to still land on the real float here rather than one of them'),
 ]
 
 
@@ -842,6 +846,22 @@ def test_the_notfound_snapshot_reports_an_unreadable_screenshot_instead_of_raisi
 	assert save_notfound_snapshot(str(tmp_path / 'missing.png'), str(tmp_path / 'out.png')) is False
 
 
+def test_base_color_mask_drops_an_elongated_streak_but_keeps_a_round_patch_of_the_same_area():
+	"""Reproduces the mechanism behind a real miss on 2026-09-23 (Stormwind Harbor at dusk, see
+	harbor_dusk_streak_hit.png for the scene): a stretch of the sunset's reflection clipped by a base color range is
+	a thin streak, not a base. The real false blob that day was a 79x11 px fragment (aspect 7.18); a same-area round
+	patch is left alone."""
+	hsv = np.zeros((200, 200, 3), dtype=np.uint8)
+	hsv[:, :] = (115, 60, 40)   # background outside all ranges
+	hsv[50:61, 100:179] = (20, 150, 180)     # 79x11 = 869px streak, range 0 only - same shape as the real miss
+	hsv[150:168, 100:118] = (20, 150, 180)   # 18x18 = 324px round patch, range 0 only
+
+	mask = _base_color_mask(hsv, ui_boxes=())
+
+	assert not mask[50:61, 100:179].any()   # the streak does not survive
+	assert mask[150:168, 100:118].any()     # the round patch does
+
+
 # ---- latent risks flagged by review, pinned as tests rather than fixed (see the review for the tradeoffs)
 
 def test_find_base_picks_the_first_qualifying_range_not_the_biggest_blob():
@@ -860,6 +880,24 @@ def test_find_base_picks_the_first_qualifying_range_not_the_biggest_blob():
 
 	assert area == 36   # range 0's small blob, not range 2's 400px one
 	assert abs(point[0] - 12.5) <= 2 and abs(point[1] - 12.5) <= 2
+
+
+def test_find_base_accepts_an_oversized_blob_that_share_alone_cannot_catch():
+	"""Reproduces a real miss on 2026-09-23 (Stormwind Harbor at dusk, ~04:34): the click-search region held a
+	~3000px, 112x63 patch of reflected water that is not the float's base, but _find_base accepted it - it clears
+	FLOAT_MIN_BASE_BLOB_AREA, and at 12% of a same-sized region it is comfortably under FLOAT_MAX_BASE_BLOB_SHARE
+	(0.5). Tightening the share ceiling was tried and rejected: confirmed real bases measured across
+	tests/fixtures/*.png run 0.39%-15.42% of their own click-search region, so 12% cannot be told from a real one
+	by share alone, and neither can FLOAT_MIN_BASE_BLOB_EXTENT / FLOAT_MAX_BASE_BLOB_ASPECT (used in
+	_base_color_mask) - the real false blob's extent (0.42) and aspect (1.78) both fell inside the range those
+	catch. Pinning the gap rather than guessing a number likely to reject a real base somewhere else."""
+	hsv = np.zeros((145, 172, 3), dtype=np.uint8)
+	hsv[:, :] = (115, 60, 40)   # background outside all ranges
+	hsv[40:90, 50:110] = (20, 30, 60)   # 60x50 = 3000px, in range 2 - the real false blob's approximate size
+
+	point, area = _find_base(hsv)
+
+	assert point is not None and area > 2500   # accepted - the known gap
 
 
 def test_the_agreement_share_was_calibrated_on_the_current_template_set():
