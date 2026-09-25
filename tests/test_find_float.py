@@ -910,3 +910,12 @@ def test_the_agreement_share_was_calibrated_on_the_current_template_set():
 	count = len(_load_templates())
 
 	assert count == 7, str(count) + ' templates found, not the 7 FLOAT_MIN_AGREEING_SHARE was calibrated on'
+
+
+def test_the_template_base_share_floor_was_calibrated_on_the_current_template_set():
+	"""FLOAT_MIN_TEMPLATE_BASE_SHARE's comment cites per-template base shares measured with _find_base itself; this
+	re-measures them the same way and checks the count that falls back to FALLBACK_POINT, so a changed template set
+	doesn't leave that comment's numbers silently wrong again the way they already were once (see its own history)."""
+	using_own_base = sum(1 for path, _ in _load_templates() if _template_base_anchor(path) != FALLBACK_POINT)
+
+	assert using_own_base == 4, str(using_own_base) + ' of 7 templates use their own base position, not the 4 the comment above FLOAT_MIN_TEMPLATE_BASE_SHARE was re-measured on'

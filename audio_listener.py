@@ -34,7 +34,7 @@ def is_bite(rms_window, threshold):
 	return sum(rms_window) / len(rms_window) > threshold
 
 
-def listen(threshold=15, rate=None, channels=1, silence_limit_seconds=1, timeout_seconds=23, stop_event=None, device_index=None):
+def listen(threshold=15, rate=None, channels=1, bite_window_seconds=1, timeout_seconds=23, stop_event=None, device_index=None):
 	"""Listen for the fishing bite sound and return True once one is heard.
 
 	By default this listens on the BlackHole loopback device (game audio routed through it),
@@ -45,6 +45,9 @@ def listen(threshold=15, rate=None, channels=1, silence_limit_seconds=1, timeout
 	`stop_event` (a threading.Event) is set, if one is passed in. The default padded a
 	couple seconds past the server's ~19-20s bite window to cover the time locate_float()
 	spends screenshotting and matching before this even starts listening.
+
+	`bite_window_seconds` sizes the sliding window is_bite() averages over: how long a loud sound
+	must be sustained to count as a bite rather than a brief spike (a click/pop) - see is_bite().
 	"""
 	print('Listening for the fishing bite sound...')
 	CHUNK = 1024  # CHUNKS of bytes to read each time from mic
@@ -68,7 +71,7 @@ def listen(threshold=15, rate=None, channels=1, silence_limit_seconds=1, timeout
 	                frames_per_buffer=CHUNK)
 
 	rel = rate / CHUNK
-	slid_win = deque(maxlen=math.ceil(silence_limit_seconds * rel))
+	slid_win = deque(maxlen=math.ceil(bite_window_seconds * rel))
 	success = False
 	max_avg_seen = 0
 	listening_start_time = time.time()
@@ -89,7 +92,8 @@ def listen(threshold=15, rate=None, channels=1, silence_limit_seconds=1, timeout
 			if time.time() - listening_start_time > timeout_seconds:
 				print('No bite after ' + str(timeout_seconds) + 's (peak avg level seen: ' + str(round(max_avg_seen)) + ', threshold ' + str(threshold) + ')')
 				break
-		except IOError:
+		except IOError as e:
+			print('Audio stream error, giving up on this listen: ' + str(e))
 			break
 
 	stream.close()

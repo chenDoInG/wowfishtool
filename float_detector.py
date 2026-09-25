@@ -114,8 +114,10 @@ CLICK_SEARCH_PADDING_LEFT_RATIO = 0
 CLICK_SEARCH_PADDING_RIGHT_RATIO = 0.3
 FALLBACK_VERTICAL_BIAS = 0.65
 FALLBACK_POINT = (0.5, FALLBACK_VERTICAL_BIAS)   # (x, y) as fractions of the box, for a template whose own base cannot be located
-# The base must fill this share of the template to trust its position there. Measured on the 7 templates: 7.4%, 4.0%,
-# 2.0%, 0.8%, 0.6%, 0.06% and none - a template that is mostly water has only a few base pixels, and its centroid is noise.
+# The base must fill this share of the template to trust its position there. Re-measured on the current 7 templates
+# with _find_base itself: 10.14%, 4.90%, 11.79%, 12.14% clear this floor and use their own base position; 0.89%,
+# 1.05%, 1.13% (mostly water, only a few base pixels whose centroid would be noise) fall under it and use
+# FALLBACK_POINT instead - 3 of 7, not the 1 an earlier, never-accurate version of this comment implied.
 FLOAT_MIN_TEMPLATE_BASE_SHARE = 0.03
 
 # Templates are crops from ~2560 px wide windows and only match a float of about that size. A screenshot outside
@@ -127,7 +129,7 @@ FLOAT_MAX_UPSCALE = 4
 
 # Debugging: a trace line per step, and an annotated screenshot in DEBUG_SNAPSHOT_DIR when the click falls back to the
 # box or the pick is on base color that no second kind of evidence backs. Keep False when committing.
-DEBUG_SNAPSHOTS = False
+DEBUG_SNAPSHOTS = True
 DEBUG_TRACE = False   # the [float] trace lines only; the snapshots above stay on. Only matters while DEBUG_SNAPSHOTS is on
 DEBUG_SNAPSHOT_DIR = 'debug'   # not var/, which holds the bot's real runtime data
 
