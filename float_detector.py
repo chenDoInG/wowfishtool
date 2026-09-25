@@ -17,6 +17,7 @@ Coordinates are in the original screenshot's pixels. Comments say what a constan
 measured on; the history is in the commit messages and README.
 """
 import glob
+import json
 import math
 import os
 import time
@@ -49,10 +50,29 @@ FLOAT_SEARCH_Y_RANGE = (0.36, 0.80)
 
 # Screen elements inside the band that are never the float: the player frame (bottom-left) and the copy WoW's
 # default modern layout adds (bottom-right). Fractions of the window, measured on a 2560x1410 capture, padded.
+# Only the default for a UI that has never been calibrated - see UI_REGIONS_PATH below.
 UI_EXCLUDE_REGIONS = (
 	((0.26, 0.36), (0.72, 0.80)),
 	((0.62, 0.76), (0.71, 0.83)),
 )
+# ui_calibrate.py writes real, auto-detected regions here (window fractions, same shape as UI_EXCLUDE_REGIONS
+# above) for a UI layout that does not match the hardcoded default - moved frames, a non-default Edit Mode
+# layout, or an addon that reskins the unit frame entirely. Not committed (var/ is gitignored, per-user data).
+UI_REGIONS_PATH = 'var/ui_regions.json'
+
+
+def _ui_exclude_regions():
+	"""UI_EXCLUDE_REGIONS, or the calibrated regions from UI_REGIONS_PATH if that file exists. A missing or
+	unreadable file falls back to the hardcoded default rather than taking detection down - calibration is
+	optional, not required to run at all."""
+	if not os.path.exists(UI_REGIONS_PATH):
+		return UI_EXCLUDE_REGIONS
+	try:
+		with open(UI_REGIONS_PATH) as f:
+			return json.load(f)
+	except (OSError, ValueError) as error:
+		print('Could not read ' + UI_REGIONS_PATH + ', using the default UI_EXCLUDE_REGIONS: ' + str(error))
+		return UI_EXCLUDE_REGIONS
 
 # Evidence 1, relative saturation: a pixel counts when it is more saturated than the scene's water by a margin.
 # The baseline is the 99.5th percentile (a saturated sea plateaus up to its 99th) and leaves the UI frames out
@@ -243,10 +263,10 @@ def _search_bounds(w: int, h: int):
 
 
 def _ui_boxes(w: int, h: int, bounds):
-	"""UI_EXCLUDE_REGIONS as boxes in band coordinates, clipped to the band."""
+	"""The UI exclude regions (see _ui_exclude_regions) as boxes in band coordinates, clipped to the band."""
 	search_x0, search_y0, search_x1, search_y1 = bounds
 	boxes = []
-	for (x_range, y_range) in UI_EXCLUDE_REGIONS:
+	for (x_range, y_range) in _ui_exclude_regions():
 		x0 = max(0, int(w * x_range[0]) - search_x0)
 		x1 = min(search_x1 - search_x0, int(w * x_range[1]) - search_x0)
 		y0 = max(0, int(h * y_range[0]) - search_y0)

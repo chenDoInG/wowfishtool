@@ -26,3 +26,13 @@ def _debug_snapshots_off(monkeypatch, tmp_path_factory):
 	monkeypatch.setattr(float_detector, 'DEBUG_SNAPSHOTS', False)
 	monkeypatch.setattr(float_detector, 'DEBUG_TRACE', True)   # off locally to quieten the console; a test that turns DEBUG_SNAPSHOTS on wants the trace
 	monkeypatch.setattr(float_detector, 'DEBUG_SNAPSHOT_DIR', str(tmp_path_factory.mktemp('debug_snapshots')))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_ui_calibration(monkeypatch, tmp_path_factory):
+	"""ui_calibrate.py writes real, per-user data to var/ui_regions.json - if that file exists on whatever
+	machine runs the tests, _ui_exclude_regions() would silently use it instead of UI_EXCLUDE_REGIONS (or
+	whatever a test monkeypatches that to), making test results depend on the developer's own calibration
+	state. Point it at a path that never exists instead."""
+	import float_detector
+	monkeypatch.setattr(float_detector, 'UI_REGIONS_PATH', str(tmp_path_factory.mktemp('no_ui_regions') / 'ui_regions.json'))
