@@ -163,7 +163,13 @@ def find_ui_regions(img_bgr: np.ndarray):
     """[(x0, y0, x1, y1)] in screenshot pixels, one per unit frame found (a player frame, a target frame,
     ...). Padding is symmetric left/right on purpose: the player frame hangs its portrait to the bar's left,
     but WoW's default target frame mirrors that with the portrait on the right, and one fixed asymmetric pad
-    cannot fit both - see the module docstring's real-screenshot comparison."""
+    cannot fit both - see the module docstring's real-screenshot comparison.
+
+    Padding scales off the bar's own width, not its height: measured on a real screenshot (2026-09-25) a
+    compact addon skin's bars were only 9-18px tall but still fronted by a full-size portrait, and a
+    height-scaled pad (5x height, ~45px) fell 120px short of that portrait's edge - a real miss this session
+    watched happen. Width tracks a frame's overall footprint far more consistently across skins than a bar's
+    height, which some skins make arbitrarily thin on its own."""
     h, w = img_bgr.shape[:2]
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
     regions = []
@@ -178,9 +184,9 @@ def find_ui_regions(img_bgr: np.ndarray):
             # matches a paired one instead of hugging the health bar alone.
             top, bottom = hy, hy + 2 * hh
             left, right = hx, hx + hw
-        pad_x = int(5 * hh)
-        pad_top = int(1.5 * hh)
-        pad_bottom = int(2.5 * hh)
+        pad_x = int(2.0 * hw)
+        pad_top = int(0.6 * hw)
+        pad_bottom = int(0.6 * hw)
         region = (max(0, left - pad_x), max(0, top - pad_top), min(w, right + pad_x), min(h, bottom + pad_bottom))
         regions.append(region)
         _debug('region ' + str(region) + ' padded from health ' + str((hx, hy, hw, hh))
