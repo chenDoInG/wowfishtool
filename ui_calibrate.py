@@ -20,10 +20,12 @@ screen's horizontal center: the fishing cast's own progress bar is the other lon
 turn up, and it always sits centered at the bottom of the screen while casting - unit frames (moved or not)
 essentially never do. See HEALTH_BAR_CENTER_EXCLUSION.
 
-Run directly (`python ui_calibrate.py [screenshot]`, defaults to var/fishing_session.png) to detect the
-regions on a real screenshot, save an annotated preview to debug/ui_calibration.png for a visual check, and
-write the regions to var/ui_regions.json - float_detector.py reads that file if present, falling back to its
-own UI_EXCLUDE_REGIONS default otherwise.
+Run directly (`python ui_calibrate.py [screenshot] [--trace]`, screenshot defaults to var/fishing_session.png)
+to detect the regions on a real screenshot, save an annotated preview to debug/ui_calibration.png for a
+visual check, and write the regions to var/ui_regions.json - float_detector.py reads that file if present,
+falling back to its own UI_EXCLUDE_REGIONS default otherwise. --trace prints every candidate bar found and
+why each one was paired, accepted alone, or rejected - the same idea as float_detector.py's DEBUG_TRACE, for
+the same reason: working out why a real screenshot didn't calibrate the way you expected without guessing.
 """
 import json
 import os
@@ -48,6 +50,12 @@ BAR_MIN_AREA = 300      # px; drops thin slivers (anti-aliased edges, single-pix
 # fill's own color, sampled from a clean strip away from any text overlay. Health can range from full green
 # down through yellow to red as it drops, but the exclude-region calibration only needs the common "mostly
 # healthy" case to find the bar at all - this is deliberately just the green end of that range.
+#
+# A dusk-harbor screenshot's green-sailed ship rigging also matched this range and got mistaken for a lone
+# health bar (V 40-41 against a real bar's 150-184 - there's a clean gap here worth tightening the V floor
+# for). Left alone on purpose: that false region landed nowhere near the search band (see the session notes
+# around 2026-09-25 for why that makes it harmless in practice), so tightening this was not worth the risk
+# of narrowing a range that already works for every real frame measured so far.
 HEALTH_HSV_RANGE = ((35, 100, 40), (65, 255, 160))
 # Mana is measured the same way as health above. Rage and energy are not yet measured against a real
 # screenshot (no warrior/rogue capture on hand) - these are WoW's well-known standard bar colors, a starting
@@ -71,18 +79,33 @@ HEALTH_BAR_CENTER_EXCLUSION = (0.30, 0.70)   # fraction of window width; a bar c
 # paired health bar (a resource bar was found to match it) does not need this - nameplates do not show one.
 HEALTH_BAR_MIN_HEIGHT_FOR_LONE_BAR = 16
 
+# A trace line per step (candidates found, how each health bar was paired or why a lone one was accepted or
+# rejected) - same idea as float_detector.py's DEBUG_TRACE, its own opt-in switch since this tool has no
+# debug-snapshot flag to piggyback on. Off by default so a normal `python ui_calibrate.py` run stays quiet.
+UI_CALIBRATE_TRACE = False
 
-def _bar_candidates(hsv: np.ndarray, lo, hi):
+
+def _debug(message):
+    if UI_CALIBRATE_TRACE:
+        print('[ui] ' + message)
+
+
+def _bar_candidates(hsv: np.ndarray, lo, hi, label: str = ''):
     """[(x, y, w, h)] of bar-shaped blobs (wide, short, mostly filled) matching an HSV range."""
     mask = cv2.inRange(hsv, lo, hi)
     n, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     candidates = []
+    rejected = 0
     for i in range(1, n):
-        x, y, w, h, area = (stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], stats[i, cv2.CC_STAT_WIDTH],
-                             stats[i, cv2.CC_STAT_HEIGHT], stats[i, cv2.CC_STAT_AREA])
+        x, y, w, h, area = (int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP]), int(stats[i, cv2.CC_STAT_WIDTH]),
+                             int(stats[i, cv2.CC_STAT_HEIGHT]), int(stats[i, cv2.CC_STAT_AREA]))
         if area < BAR_MIN_AREA or h == 0 or w / h < BAR_MIN_ASPECT or area / (w * h) < BAR_MIN_EXTENT:
+            rejected += 1
             continue
         candidates.append((x, y, w, h))
+    if label:
+        _debug(label + ': ' + str(len(candidates)) + ' bar-shaped candidate(s) ' + str(candidates)
+               + (', ' + str(rejected) + ' connected component(s) not bar-shaped enough' if rejected else ''))
     return candidates
 
 
@@ -99,8 +122,9 @@ def _health_bars_with_resource(hsv: np.ndarray, img_width: int):
     the mana range and sat flush against it (gap 0px) - closer than the rogue target's real, correctly
     colored energy bar sitting flush below it (gap 1px) in the same frame. Comparing gaps alone would have
     picked the decoration over the real bar by that 1px; always trying "below" first does not."""
-    health = _bar_candidates(hsv, *HEALTH_HSV_RANGE)
-    resource = [box for lo, hi in RESOURCE_HSV_RANGES for box in _bar_candidates(hsv, lo, hi)]
+    health = _bar_candidates(hsv, *HEALTH_HSV_RANGE, label='health')
+    resource = [box for i, (lo, hi) in enumerate(RESOURCE_HSV_RANGES)
+                for box in _bar_candidates(hsv, lo, hi, label='resource range ' + str(i))]
     lo_frac, hi_frac = HEALTH_BAR_CENTER_EXCLUSION
     found = []
     for hx, hy, hw, hh in health:
@@ -115,12 +139,23 @@ def _health_bars_with_resource(hsv: np.ndarray, img_width: int):
                 above.append((gap_above, (rx, ry, rw, rh)))
         candidates = below or above
         if candidates:
-            _, resource_box = min(candidates, key=lambda c: c[0])
+            gap, resource_box = min(candidates, key=lambda c: c[0])
             found.append(((hx, hy, hw, hh), resource_box))
+            _debug('health ' + str((hx, hy, hw, hh)) + ' paired with resource ' + str(resource_box)
+                   + ' (' + ('below' if candidates is below else 'above') + ', gap ' + str(gap) + 'px, '
+                   + str(len(below)) + ' below-candidate(s), ' + str(len(above)) + ' above-candidate(s) seen)')
             continue
         center_frac = (hx + hw / 2) / img_width
-        if hh >= HEALTH_BAR_MIN_HEIGHT_FOR_LONE_BAR and not (lo_frac <= center_frac <= hi_frac):
+        centered = lo_frac <= center_frac <= hi_frac
+        tall_enough = hh >= HEALTH_BAR_MIN_HEIGHT_FOR_LONE_BAR
+        if tall_enough and not centered:
             found.append(((hx, hy, hw, hh), None))
+            _debug('health ' + str((hx, hy, hw, hh)) + ' has no resource bar nearby, accepted as a lone bar '
+                   '(center ' + str(round(center_frac, 2)) + ' of width, outside ' + str(HEALTH_BAR_CENTER_EXCLUSION) + ')')
+        else:
+            _debug('health ' + str((hx, hy, hw, hh)) + ' has no resource bar nearby, rejected ('
+                   + ('too short: ' + str(hh) + 'px < ' + str(HEALTH_BAR_MIN_HEIGHT_FOR_LONE_BAR) + 'px'
+                      if not tall_enough else 'centered at ' + str(round(center_frac, 2)) + ' of width, like the fishing cast bar') + ')')
     return found
 
 
@@ -146,7 +181,10 @@ def find_ui_regions(img_bgr: np.ndarray):
         pad_x = int(5 * hh)
         pad_top = int(1.5 * hh)
         pad_bottom = int(2.5 * hh)
-        regions.append((max(0, left - pad_x), max(0, top - pad_top), min(w, right + pad_x), min(h, bottom + pad_bottom)))
+        region = (max(0, left - pad_x), max(0, top - pad_top), min(w, right + pad_x), min(h, bottom + pad_bottom))
+        regions.append(region)
+        _debug('region ' + str(region) + ' padded from health ' + str((hx, hy, hw, hh))
+               + (' + resource ' + str(resource_box) if resource_box is not None else ' alone (no resource bar)'))
     return regions
 
 
@@ -165,7 +203,8 @@ def calibrate(screenshot_path: str):
     regions = find_ui_regions(img)
     if not regions:
         print('No health+resource bar pair found - is a unit frame visible in this screenshot? '
-              'Nothing written; float_detector.py keeps using its UI_EXCLUDE_REGIONS default.')
+              'Nothing written; float_detector.py keeps using its UI_EXCLUDE_REGIONS default. '
+              'Re-run with --trace to see why each candidate bar was rejected.')
         return None
 
     annotated = img.copy()
@@ -182,10 +221,15 @@ def calibrate(screenshot_path: str):
     print('Found ' + str(len(regions)) + ' region(s), saved to ' + UI_REGIONS_PATH)
     print('Look at ' + CALIBRATION_PREVIEW_PATH + ' - the red box(es) should fully cover each unit frame '
           '(portrait, bars, name) with some margin. If not, delete ' + UI_REGIONS_PATH + ' and try a '
-          'screenshot where your own frame and a target\'s are both clearly visible.')
+          'screenshot where your own frame and a target\'s are both clearly visible, or re-run with --trace '
+          'to see how each region was derived.')
     return fractions
 
 
 if __name__ == '__main__':
-    path = sys.argv[1] if len(sys.argv) > 1 else 'var/fishing_session.png'
+    args = sys.argv[1:]
+    if '--trace' in args:
+        args.remove('--trace')
+        UI_CALIBRATE_TRACE = True
+    path = args[0] if args else 'var/fishing_session.png'
     calibrate(path)
