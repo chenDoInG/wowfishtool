@@ -25,7 +25,10 @@ dev = False
 # it as 'World of Warcraft Classic' - retail would presumably be 'World of Warcraft').
 # "world of warcraft" alone covers both macOS cases since Classic's name contains it as a
 # substring. Matching is case-insensitive (see is_wow_running()).
-WOW_PROCESS_NAMES = ["wow.exe", "wowclassic.exe", "wow-64.exe", "wowclassic-64.exe", "world of warcraft"]
+# "wowb.exe" is the permanent level-60 server's own client on Windows (2026-10-03 report);
+# "wowt.exe" was separately reported for the 国服 (mainland China) client - neither follows
+# the "wow"/"wowclassic" naming above, so each had to be added as its own exact entry.
+WOW_PROCESS_NAMES = ["wow.exe", "wowclassic.exe", "wow-64.exe", "wowclassic-64.exe", "wowb.exe", "wowt.exe", "world of warcraft"]
 
 SCREENSHOT_PATH = 'var/fishing_session.png'
 
